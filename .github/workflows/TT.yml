@@ -1,0 +1,32 @@
+## 每隔3小时拉取一次作者脚本到自己仓库的分支
+
+
+
+name: TT-sync
+on:
+  schedule:
+    - cron: '6 */3 * * *'
+  workflow_dispatch:
+  watch:
+    types: started
+  repository_dispatch:
+    types: sync-TT-Script
+jobs:
+  repo-sync:
+    env:
+      PAT: ${{ secrets.PAT }} 
+    runs-on: ubuntu-latest
+    if: github.event.repository.owner.id == github.event.sender.id
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          persist-credentials: false
+
+      - name: sync TT-Script
+        uses: repo-sync/github-sync@v2
+        if: env.PAT
+        with:
+          source_repo: "https://github.com/nic18/jd_scripts_gitee.git"
+          source_branch: "master"
+          destination_branch: "TT"
+          github_token: ${{ secrets.PAT }}
