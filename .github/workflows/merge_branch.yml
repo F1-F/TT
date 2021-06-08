@@ -32,4 +32,14 @@ jobs:
           target_branch: main
           github_token: ${{ secrets.PAT }}
           
-  
+  # 我自己同步到gitee使用，其他人可忽略
+      - name: sync github -> gitee
+        uses: Yikun/hub-mirror-action@master
+        if: env.dst_key
+        with:
+          src: github/a01191
+          dst: gitee/joinmogul
+          static_list: 'dog' #单引号,双引号报错
+          dst_key: ${{ secrets.GITEE_PRIVATE_KEY }}
+          dst_token: ${{ secrets.GITEE_TOKEN }}
+          force_update: true
