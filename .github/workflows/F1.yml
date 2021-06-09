@@ -27,6 +27,6 @@ jobs:
         if: env.PAT
         with:
           source_repo: "https://github.com/a01191/dog.git"
-          source_branch: "master"
+          source_branch: "main"
           destination_branch: "F1"
           github_token: ${{ secrets.PAT }}
