@@ -28,6 +28,6 @@ jobs:
         with:
           source_repo: "https://github.com/passerby-b/JDDJ.git"
           source_branch: "main"
-          destination_branch: "jddj"
+          destination_branch: "passerby-b"
           github_token: ${{ secrets.PAT }}
      
