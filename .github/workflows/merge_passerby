@@ -7,7 +7,7 @@ on:
   watch:
     types: started
   push:
-    branches: [ main ]
+    branches: [ passerby-b ]
   repository_dispatch:
     types: passerby-b
 jobs:
@@ -23,7 +23,7 @@ jobs:
           persist-credentials: false
 
 
-      - name: Merge main from master
+      - name: Merge main from passerby-b
         uses: devmasx/merge-branch@v1.3.1
         if: env.PAT
         with:
