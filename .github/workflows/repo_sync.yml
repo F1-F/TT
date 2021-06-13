@@ -1,5 +1,5 @@
 # File: .github/workflows/repo-sync.yml
-name: sync-LXK9301-scripts
+name: sync-passerby-b-JDDJ
 on:
   schedule:
     - cron: '1 0,15 * * *'
@@ -7,9 +7,9 @@ on:
   watch:
     types: started
   push:
-    branches: [ master ]
+    branches: [ jddj ]
   repository_dispatch:
-    types: sync-LXK9301-scripts
+    types: sync-passerby-b-JDDJ
 jobs:
   repo-sync:
     env:
@@ -22,7 +22,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: sync LXK9301-scripts
+      - name: sync passerby-b-JDDJ
         uses: repo-sync/github-sync@v2
         if: env.PAT
         with:
