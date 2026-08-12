@@ -1,387 +1,58 @@
-name: Cloudflare IPv6 Top 25
-
-run-name: CF IPv6 Scan #${{ github.run_number }}
+name: Collect Best CF IPV4
 
 on:
+  schedule:
+    - cron: '50 */3 * * *'
   workflow_dispatch:
 
-  schedule:
-    # 每 6 小时运行一次
-    # 东京/韩国时间分别为 03:17 / 09:17 / 15:17 / 21:17
-    - cron: "17 */6 * * *"
-      timezone: "Asia/Tokyo"
+concurrency:
+  group: Collect Best CF IPV4
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
-concurrency:
-  group: cf-ipv6-scan
-  cancel-in-progress: true
-
 jobs:
-
-  scan:
-    name: IPv6 Ping + TCP 443
+  collect-best-cf-ipv4:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
-
+    timeout-minutes: 30
     steps:
+      - uses: actions/checkout@v7
 
-      # ==================================================
-      # 1. Checkout
-      # ==================================================
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # ==================================================
-      # 2. 检查 IPv6
-      # ==================================================
-
-      - name: Check IPv6 connectivity
-        shell: bash
-        run: |
-
-          echo "=========================================="
-          echo "IPv6 connectivity test"
-          echo "=========================================="
-
-          ip -6 route || true
-
-          echo ""
-
-          if ping -6 -c 2 -W 2 2606:4700:4700::1111 >/dev/null 2>&1; then
-
-              echo "IPv6 connectivity: OK"
-
-          else
-
-              echo ""
-              echo "ERROR:"
-              echo "GitHub Runner does not have usable IPv6."
-              echo ""
-              echo "Scan aborted."
-              exit 1
-
-          fi
-
-      # ==================================================
-      # 3. 安装工具
-      # ==================================================
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
 
       - name: Install dependencies
-        shell: bash
+        run: pip install -r .github/scripts/requirements.txt
+
+      - name: Get Playwright version
+        id: pw-version
         run: |
-
-          sudo apt-get update
-
-          sudo apt-get install -y \
-            iputils-ping \
-            netcat-openbsd \
-            python3
-
-      # ==================================================
-      # 4. 创建目录
-      # ==================================================
-
-      - name: Create directories
-        shell: bash
-        run: |
-
-          mkdir -p scan
-          mkdir -p scan/results
-          mkdir -p output
-
-      # ==================================================
-      # 5. 随机生成 10,000 IPv6
-      # ==================================================
-
-      - name: Generate IPv6 candidates
-        shell: bash
-        run: |
-
-          python3 << 'PY'
-
-          import ipaddress
-          import secrets
-
-          networks = [
-              ipaddress.IPv6Network("2606:4700:5a::/48"),
-              ipaddress.IPv6Network("2606:4700:57::/48"),
-          ]
-
-          per_network = 5000
-
-          addresses = set()
-
-          for network in networks:
-
-              prefix = int(network.network_address)
-
-              host_bits = 128 - network.prefixlen
-
-              while len(addresses) < per_network * len(networks):
-
-                  host = secrets.randbits(host_bits)
-
-                  ip = ipaddress.IPv6Address(prefix | host)
-
-                  if ip not in network:
-                      continue
-
-                  addresses.add(str(ip))
-
-          addresses = sorted(addresses)
-
-          with open("scan/candidates.txt", "w") as f:
-
-              for ip in addresses:
-                  f.write(ip + "\n")
-
-          print("Total candidates:", len(addresses))
-
-          PY
-
-          echo ""
-          wc -l scan/candidates.txt
-
-      # ==================================================
-      # 6. ICMP Ping 初筛
-      # ==================================================
-
-      - name: IPv6 ICMP Ping scan
-        shell: bash
-        run: |
-
-          echo "=========================================="
-          echo "ICMP IPv6 scan"
-          echo "=========================================="
-
-          : > scan/results/ping.txt
-
-          cat scan/candidates.txt | \
-          xargs -P 64 -I {} bash -c '
-
-              IP="{}"
-
-              RESULT=$(ping -6 \
-                  -c 2 \
-                  -W 1 \
-                  "$IP" 2>/dev/null)
-
-              if [ $? -eq 0 ]; then
-
-                  AVG=$(echo "$RESULT" | \
-                    awk -F "/" "/^rtt|^round-trip/ {print \$5}")
-
-                  if [ -n "$AVG" ]; then
-
-                      echo "$AVG|$IP" >> scan/results/ping.txt
-
-                  fi
-
-              fi
-          '
-
-          echo ""
-          echo "Alive IPv6:"
-          wc -l scan/results/ping.txt
-
-          echo ""
-          echo "Fastest Ping:"
-          sort -n scan/results/ping.txt | head -50
-
-      # ==================================================
-      # 7. 只对 Ping 最快的 200 个测试 TCP 443
-      # ==================================================
-
-      - name: TCP 443 test
-        shell: bash
-        run: |
-
-          echo "=========================================="
-          echo "TCP 443 test"
-          echo "=========================================="
-
-          : > scan/results/tcp.txt
-
-          sort -n scan/results/ping.txt | \
-          head -200 > scan/results/ping_top200.txt
-
-          cat scan/results/ping_top200.txt | \
-          xargs -P 32 -I {} bash -c '
-
-              LINE="{}"
-
-              PING=$(echo "$LINE" | cut -d "|" -f1)
-
-              IP=$(echo "$LINE" | cut -d "|" -f2)
-
-              START=$(date +%s%N)
-
-              if timeout 3 nc -6 -z "$IP" 443 >/dev/null 2>&1; then
-
-                  END=$(date +%s%N)
-
-                  TCP_MS=$(( (END - START) / 1000000 ))
-
-                  echo "$TCP_MS|$PING|$IP" >> scan/results/tcp.txt
-
-              fi
-          '
-
-          echo ""
-          echo "TCP 443 reachable:"
-          wc -l scan/results/tcp.txt
-
-          echo ""
-          echo "Fastest TCP:"
-          sort -n scan/results/tcp.txt | head -50
-
-      # ==================================================
-      # 8. TCP 排序并生成 Top 25
-      # ==================================================
-
-      - name: Generate Top 25
-        shell: bash
-        run: |
-
-          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
-
-          OUTPUT="output/best-cf-ipv6.txt"
-
-          if [ ! -s scan/results/tcp.txt ]; then
-
-              echo "ERROR: No IPv6 passed TCP 443 test."
-
-              exit 1
-
-          fi
-
-          COUNT=$(wc -l < scan/results/tcp.txt)
-
-          if [ "$COUNT" -lt 25 ]; then
-
-              echo "ERROR: Only $COUNT IPv6 passed TCP 443."
-
-              exit 1
-
-          fi
-
-          cat > "$OUTPUT" << EOF
-#25 bestips updated at $TIMESTAMP
-# Source: 2606:4700:5a::/48
-# Source: 2606:4700:57::/48
-# Port: 443
-# Method: ICMP Ping + TCP 443
-# Ranking: TCP 443 connection latency
-EOF
-
-          echo "" >> "$OUTPUT"
-
-          sort -n scan/results/tcp.txt | \
-          head -25 | \
-          awk -F "|" '
-          {
-              rank++;
-
-              printf "%s:443#JP%02d\n", $3, rank;
-          }
-          ' >> "$OUTPUT"
-
-          echo ""
-          echo "=========================================="
-          echo "TOP 25"
-          echo "=========================================="
-
-          cat "$OUTPUT"
-
-      # ==================================================
-      # 9. 生成详细测速结果
-      # ==================================================
-
-      - name: Generate detailed results
-        shell: bash
-        run: |
-
-          DETAIL="output/best-cf-ipv6-detail.txt"
-
-          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
-
-          cat > "$DETAIL" << EOF
-# Cloudflare IPv6 Top 25
-# Updated: $TIMESTAMP
-# Port: 443
-#
-# Format:
-# Rank | IPv6 | ICMP Ping | TCP 443
-EOF
-
-          echo "" >> "$DETAIL"
-
-          sort -n scan/results/tcp.txt | \
-          head -25 | \
-          awk -F "|" '
-          {
-              rank++;
-
-              printf "JP%02d | %s | %s ms | %s ms\n",
-              rank,
-              $3,
-              $2,
-              $1;
-          }
-          ' >> "$DETAIL"
-
-          echo ""
-          echo "=========================================="
-          echo "Detailed result"
-          echo "=========================================="
-
-          cat "$DETAIL"
-
-      # ==================================================
-      # 10. 保存扫描数据
-      # ==================================================
-
-      - name: Upload scan artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-
+          VERSION=$(python -c 'from importlib.metadata import version; print(version("playwright"))')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v6
         with:
-          name: cf-ipv6-scan-${{ github.run_number }}
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
 
-          path: |
-            scan/
-            output/
+      - name: Install Playwright Chromium
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: python -m playwright install --with-deps chromium
 
-          retention-days: 7
+      - name: Collect Best CF IPV4
+        run: python3 .github/scripts/best-cf-ipv4-collector.py
 
-      # ==================================================
-      # 11. 提交结果到 GitHub
-      # ==================================================
-
-      - name: Commit results
-        shell: bash
+      - name: Commit update
         run: |
-
-          git config user.name "github-actions[bot]"
-
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add output/best-cf-ipv6.txt
-          git add output/best-cf-ipv6-detail.txt
-
-          if git diff --cached --quiet; then
-
-              echo "No changes."
-
-          else
-
-              git commit \
-                -m "Update CF IPv6 Top 25"
-
-              git push
-
-          fi
+          git config user.name "Lancelot"
+          git config user.email "Lancelot@example.com"
+          git add best-cf-ipv4.txt
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git commit -m "Best CF ipv4 list updated $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M')"
+          git pull --rebase
+          git push
