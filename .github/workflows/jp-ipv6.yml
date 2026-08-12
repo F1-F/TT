@@ -1,0 +1,431 @@
+name: JP IPv6 443 Node Scanner
+
+on:
+  schedule:
+    # 每 6 小时运行一次
+    - cron: "0 */6 * * *"
+
+  # 支持 GitHub Actions 页面手动运行
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    name: Scan Japan IPv6 443 Nodes
+    runs-on: ubuntu-24.04
+
+    timeout-minutes: 30
+
+    steps:
+      # ============================================================
+      # 1. 检出仓库
+      # ============================================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ============================================================
+      # 2. 检查 GitHub Runner 是否拥有 IPv6
+      # ============================================================
+      - name: Check IPv6 connectivity
+        shell: bash
+        run: |
+          set -u
+
+          echo "========================================"
+          echo "Checking IPv6 connectivity..."
+          echo "========================================"
+
+          if curl -6 \
+              -sS \
+              --connect-timeout 5 \
+              --max-time 10 \
+              -o /dev/null \
+              https://www.youtube.com/generate_204; then
+
+            echo "IPv6 connectivity: OK"
+
+          else
+
+            echo "::warning::GitHub Runner IPv6 connectivity is unavailable."
+            echo "Cloudflare IPv6 nodes may not be testable from this runner."
+
+          fi
+
+      # ============================================================
+      # 3. 下载 CloudflareSpeedTest 最新版本
+      # ============================================================
+      - name: Download latest CloudflareSpeedTest
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p tools
+
+          echo "Downloading latest CloudflareSpeedTest..."
+
+          curl -L \
+            --fail \
+            --retry 3 \
+            -o /tmp/cfst.tar.gz \
+            "https://github.com/XIU2/CloudflareSpeedTest/releases/latest/download/cfst_linux_amd64.tar.gz"
+
+          tar -xzf /tmp/cfst.tar.gz -C tools
+
+          chmod +x tools/cfst
+
+          echo "CloudflareSpeedTest version:"
+          ./tools/cfst -v
+
+      # ============================================================
+      # 4. 扫描两个 IPv6 /48
+      #
+      # 2606:4700:5a::/48
+      # 2606:4700:57::/48
+      #
+      # 日本节点：
+      # NRT = Tokyo
+      # KIX = Osaka
+      # ============================================================
+      - name: Scan Japan IPv6 nodes
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p work output
+
+          echo "========================================"
+          echo "Target IPv6 prefixes:"
+          echo "2606:4700:5a::/48"
+          echo "2606:4700:57::/48"
+          echo "========================================"
+
+          echo "Target URL:"
+          echo "https://www.youtube.com/generate_204"
+
+          echo "========================================"
+          echo "Starting CloudflareSpeedTest..."
+          echo "========================================"
+
+          ./tools/cfst \
+            -ip "2606:4700:5a::/48,2606:4700:57::/48" \
+            -tp 443 \
+            -httping \
+            -url "https://www.youtube.com/generate_204" \
+            -cfcolo "NRT,KIX" \
+            -tl 100 \
+            -tll 0 \
+            -tlr 0 \
+            -n 200 \
+            -t 4 \
+            -dd \
+            -p 1000 \
+            -o work/result.csv
+
+          echo "========================================"
+          echo "Raw scan completed."
+          echo "========================================"
+
+          if [ ! -f work/result.csv ]; then
+            echo "::error::CloudflareSpeedTest did not generate result.csv"
+            exit 1
+          fi
+
+          echo "Result file:"
+          cat work/result.csv
+
+      # ============================================================
+      # 5. 从 CFST CSV 中提取：
+      #
+      # - IPv6
+      # - 平均延迟
+      # - 最多 1000 个
+      # - 按延迟最低排序
+      # - 最终 25 个
+      # ============================================================
+      - name: Select top 25 IPv6 nodes
+        shell: bash
+        run: |
+          set -e
+
+          python3 <<'PY'
+          import csv
+          import ipaddress
+          import os
+
+          input_file = "work/result.csv"
+          output_dir = "output"
+
+          os.makedirs(output_dir, exist_ok=True)
+
+          candidates = []
+
+          with open(
+              input_file,
+              "r",
+              encoding="utf-8-sig",
+              newline=""
+          ) as f:
+
+              reader = csv.DictReader(f)
+
+              for row in reader:
+
+                  # ------------------------------------------------
+                  # 兼容 CloudflareSpeedTest 中文/英文 CSV
+                  # ------------------------------------------------
+                  ip_value = (
+                      row.get("IP 地址")
+                      or row.get("IP")
+                      or row.get("IP Address")
+                  )
+
+                  latency_value = (
+                      row.get("平均延迟")
+                      or row.get("Average Latency")
+                      or row.get("Latency")
+                  )
+
+                  if not ip_value or not latency_value:
+                      continue
+
+                  ip_value = ip_value.strip()
+
+                  # ------------------------------------------------
+                  # 确认必须是 IPv6
+                  # ------------------------------------------------
+                  try:
+                      ip_obj = ipaddress.ip_address(ip_value)
+
+                      if ip_obj.version != 6:
+                          continue
+
+                  except ValueError:
+                      continue
+
+                  # ------------------------------------------------
+                  # 必须属于指定的两个 /48
+                  # ------------------------------------------------
+                  allowed = (
+                      ip_obj in ipaddress.ip_network(
+                          "2606:4700:5a::/48"
+                      )
+                      or
+                      ip_obj in ipaddress.ip_network(
+                          "2606:4700:57::/48"
+                      )
+                  )
+
+                  if not allowed:
+                      continue
+
+                  # ------------------------------------------------
+                  # 读取平均延迟
+                  # ------------------------------------------------
+                  try:
+                      latency = float(
+                          str(latency_value)
+                          .replace("ms", "")
+                          .strip()
+                      )
+                  except ValueError:
+                      continue
+
+                  # ------------------------------------------------
+                  # 最大延迟 100ms
+                  # ------------------------------------------------
+                  if latency > 100:
+                      continue
+
+                  # ------------------------------------------------
+                  # 保存
+                  # ------------------------------------------------
+                  candidates.append(
+                      (latency, str(ip_obj))
+                  )
+
+          # --------------------------------------------------------
+          # 去重
+          # --------------------------------------------------------
+          candidates = list(set(candidates))
+
+          # --------------------------------------------------------
+          # 按平均延迟从低到高排序
+          # --------------------------------------------------------
+          candidates.sort(
+              key=lambda item: item[0]
+          )
+
+          # --------------------------------------------------------
+          # 最多保留 1000 个候选
+          # --------------------------------------------------------
+          candidates = candidates[:1000]
+
+          print()
+          print("========================================")
+          print(
+              "Candidates <= 100ms:",
+              len(candidates)
+          )
+          print("========================================")
+
+          # --------------------------------------------------------
+          # 最终取最低延迟的 25 个
+          # --------------------------------------------------------
+          top25 = candidates[:25]
+
+          # --------------------------------------------------------
+          # 清理旧的 .ping 文件
+          # --------------------------------------------------------
+          for filename in os.listdir(output_dir):
+
+              if filename.endswith(".ping"):
+
+                  os.remove(
+                      os.path.join(
+                          output_dir,
+                          filename
+                      )
+                  )
+
+          # --------------------------------------------------------
+          # 生成：
+          #
+          # JP01.ping
+          # JP02.ping
+          # ...
+          # JP25.ping
+          #
+          # 文件内容只有：
+          #
+          # [IPv6]:443
+          # --------------------------------------------------------
+          for index, (latency, ip) in enumerate(
+              top25,
+              start=1
+          ):
+
+              filename = os.path.join(
+                  output_dir,
+                  f"JP{index:02d}.ping"
+              )
+
+              with open(
+                  filename,
+                  "w",
+                  encoding="utf-8"
+              ) as f:
+
+                  f.write(
+                      f"[{ip}]:443\n"
+                  )
+
+          # --------------------------------------------------------
+          # 生成纯节点列表
+          #
+          # 同样不包含：
+          # JP01
+          # 延迟
+          # HTTP
+          # 其他信息
+          # --------------------------------------------------------
+          result_file = os.path.join(
+              output_dir,
+              "jp_ipv6_results.txt"
+          )
+
+          with open(
+              result_file,
+              "w",
+              encoding="utf-8"
+          ) as f:
+
+              for latency, ip in top25:
+
+                  f.write(
+                      f"[{ip}]:443\n"
+                  )
+
+          # --------------------------------------------------------
+          # 控制台仅显示最终数量
+          # --------------------------------------------------------
+          print()
+          print("========================================")
+          print(
+              "Final nodes:",
+              len(top25)
+          )
+          print("========================================")
+
+          if len(top25) < 25:
+
+              print(
+                  "::warning::"
+                  f"Only {len(top25)} nodes passed "
+                  "the filtering conditions."
+              )
+
+          PY
+
+      # ============================================================
+      # 6. 显示最终节点
+      #
+      # 注意：
+      # 这里只显示 [IPv6]:443
+      # ============================================================
+      - name: Display final nodes
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "Final JP IPv6 443 nodes"
+          echo "========================================"
+
+          cat output/jp_ipv6_results.txt
+
+      # ============================================================
+      # 7. 上传 GitHub Actions Artifact
+      # ============================================================
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: jp-ipv6-443-nodes
+          path: output/
+          retention-days: 7
+
+      # ============================================================
+      # 8. 保存到 GitHub 仓库
+      # ============================================================
+      - name: Commit results
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p .github/jp-ipv6
+
+          cp output/*.ping .github/jp-ipv6/ 2>/dev/null || true
+
+          cp \
+            output/jp_ipv6_results.txt \
+            .github/jp-ipv6/ 2>/dev/null || true
+
+          git config user.name \
+            "github-actions[bot]"
+
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add .github/jp-ipv6/
+
+          if git diff --cached --quiet; then
+
+            echo "No changes detected."
+
+          else
+
+            git commit \
+              -m "Update JP IPv6 443 nodes"
+
+            git push
+
+          fi
