@@ -1,0 +1,68 @@
+name: Update Japan CF IPv4 Nodes
+
+on:
+  # 每 3 小时运行一次
+  schedule:
+    - cron: '17 */3 * * *'
+
+  # 支持手动运行
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-jp-nodes:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 获取当前仓库
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 下载、筛选日本节点
+      - name: Fetch and filter Japan nodes
+        shell: bash
+        run: |
+          set -e
+
+          SOURCE_URL="https://raw.githubusercontent.com/LancelotRar/best-cf-ips/main/best-cf-ipv4.txt"
+          OUTPUT_FILE="best-cf-ipv4-jp.txt"
+
+          echo "Downloading source file..."
+          curl -fL --retry 3 --connect-timeout 10 "$SOURCE_URL" -o source.txt
+
+          echo "Filtering Japan (JP) nodes..."
+
+          # 提取 #JP 节点
+          # 删除 IP 后面的国家/地区信息，只保留：
+          # IP:443
+          grep '#JP ' source.txt \
+            | sed 's/#JP.*//' \
+            | sed '/^[[:space:]]*$/d' \
+            > "$OUTPUT_FILE"
+
+          echo "Japan nodes:"
+          cat "$OUTPUT_FILE"
+
+          echo ""
+          echo "Total Japan nodes: $(wc -l < "$OUTPUT_FILE")"
+
+      # 提交更新后的 TXT
+      - name: Commit and push
+        shell: bash
+        run: |
+          set -e
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add best-cf-ipv4-jp.txt
+
+          if git diff --cached --quiet; then
+            echo "No changes detected."
+            exit 0
+          fi
+
+          git commit -m "Update Japan CF IPv4 nodes"
+          git push
