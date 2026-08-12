@@ -1,58 +1,298 @@
-name: Collect Best CF IPV4
+name: CF IPv6 Ping Top 25
+
+run-name: CF IPv6 Ping Scan - ${{ github.run_number }}
 
 on:
-  schedule:
-    - cron: '50 */3 * * *'
   workflow_dispatch:
 
-concurrency:
-  group: Collect Best CF IPV4
-  cancel-in-progress: false
+  schedule:
+    # 每 6 小时运行一次
+    # Asia/Tokyo 时区
+    - cron: "17 */6 * * *"
+      timezone: "Asia/Tokyo"
 
 permissions:
   contents: write
 
+concurrency:
+  group: cf-ipv6-ping
+  cancel-in-progress: true
+
 jobs:
-  collect-best-cf-ipv4:
+  scan-ipv6:
+    name: Scan Cloudflare IPv6
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
     steps:
-      - uses: actions/checkout@v7
 
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
+      # ==================================================
+      # 1. Checkout
+      # ==================================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
+      # ==================================================
+      # 2. 检查 IPv6
+      # ==================================================
+      - name: Check IPv6 connectivity
+        shell: bash
+        run: |
+          echo "======================================"
+          echo "IPv6 Connectivity Check"
+          echo "======================================"
+
+          ip -6 route || true
+
+          echo ""
+          echo "Testing IPv6..."
+
+          if ping -6 -c 2 -W 2 2606:4700:4700::1111; then
+            echo "IPv6 connectivity: OK"
+          else
+            echo "IPv6 connectivity: FAILED"
+            echo ""
+            echo "GitHub Runner may not have usable IPv6."
+          fi
+
+      # ==================================================
+      # 3. 安装 Ping
+      # ==================================================
       - name: Install dependencies
-        run: pip install -r .github/scripts/requirements.txt
-
-      - name: Get Playwright version
-        id: pw-version
+        shell: bash
         run: |
-          VERSION=$(python -c 'from importlib.metadata import version; print(version("playwright"))')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          sudo apt-get update
+          sudo apt-get install -y \
+            iputils-ping \
+            coreutils \
+            python3
 
-      - name: Cache Playwright browsers
-        id: pw-cache
-        uses: actions/cache@v6
+      # ==================================================
+      # 4. 生成随机 IPv6
+      # ==================================================
+      - name: Generate random IPv6 candidates
+        shell: bash
+        run: |
+
+          mkdir -p scan
+
+          python3 << 'PY'
+          import ipaddress
+          import secrets
+
+          NETWORKS = [
+              ipaddress.IPv6Network("2606:4700:5a::/48"),
+              ipaddress.IPv6Network("2606:4700:57::/48"),
+          ]
+
+          # 每个 /48 随机抽取 500 个
+          PER_NETWORK = 500
+
+          output = []
+
+          for network in NETWORKS:
+
+              prefix = int(network.network_address)
+              host_bits = 128 - network.prefixlen
+
+              for _ in range(PER_NETWORK):
+
+                  host = secrets.randbits(host_bits)
+
+                  ip_int = prefix | host
+
+                  ip = ipaddress.IPv6Address(ip_int)
+
+                  output.append(str(ip))
+
+          # 去重
+          output = sorted(set(output))
+
+          with open("scan/candidates.txt", "w") as f:
+              for ip in output:
+                  f.write(ip + "\n")
+
+          print("Generated IPv6 candidates:", len(output))
+          PY
+
+          echo ""
+          echo "Candidate count:"
+          wc -l scan/candidates.txt
+
+      # ==================================================
+      # 5. IPv6 Ping
+      # ==================================================
+      - name: IPv6 Ping scan
+        shell: bash
+        run: |
+
+          mkdir -p scan/results
+
+          echo "======================================"
+          echo "Starting IPv6 Ping Scan"
+          echo "======================================"
+          echo "Port: 443"
+          echo "Candidates: 1000"
+          echo ""
+
+          cat scan/candidates.txt | \
+          xargs -P 32 -I {} bash -c '
+
+            IP="{}"
+
+            RESULT=$(ping -6 \
+              -c 2 \
+              -W 1 \
+              "$IP" 2>/dev/null)
+
+            if [ $? -eq 0 ]; then
+
+              AVG=$(echo "$RESULT" | \
+                awk -F "/" "/^rtt|^round-trip/ {print \$5}")
+
+              if [ -n "$AVG" ]; then
+
+                echo "$AVG|$IP" >> scan/results/ping.txt
+
+              fi
+
+            fi
+          '
+
+          echo ""
+          echo "======================================"
+          echo "Ping scan finished"
+          echo "======================================"
+
+          if [ -s scan/results/ping.txt ]; then
+
+            sort -n scan/results/ping.txt | head -25
+
+          else
+
+            echo "No IPv6 Ping results."
+
+          fi
+
+      # ==================================================
+      # 6. 生成 Top 25
+      # ==================================================
+      - name: Generate Top 25 IPv6 list
+        shell: bash
+        run: |
+
+          mkdir -p output
+
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
+
+          OUTPUT="output/best-cf-ipv6.txt"
+
+          echo "#25 bestips updated at $TIMESTAMP" > "$OUTPUT"
+          echo "# Source: 2606:4700:5a::/48" >> "$OUTPUT"
+          echo "# Source: 2606:4700:57::/48" >> "$OUTPUT"
+          echo "# Port: 443" >> "$OUTPUT"
+          echo "# Sorted by IPv6 ICMP Ping latency" >> "$OUTPUT"
+          echo "" >> "$OUTPUT"
+
+          if [ ! -s scan/results/ping.txt ]; then
+
+            echo "# No IPv6 Ping results available" >> "$OUTPUT"
+
+            echo "No IPv6 Ping results."
+
+            exit 0
+
+          fi
+
+          sort -n scan/results/ping.txt | \
+          head -25 | \
+          awk -F "|" '
+          {
+              rank++;
+
+              printf "%s:443#JP%02d\n", $2, rank;
+          }
+          ' >> "$OUTPUT"
+
+          echo ""
+          echo "======================================"
+          echo "Top 25 IPv6"
+          echo "======================================"
+
+          cat "$OUTPUT"
+
+      # ==================================================
+      # 7. 生成详细结果
+      # ==================================================
+      - name: Generate detailed result
+        shell: bash
+        run: |
+
+          DETAILED="output/best-cf-ipv6-detail.txt"
+
+          echo "# Cloudflare IPv6 Ping Results" > "$DETAILED"
+          echo "# Port: 443" >> "$DETAILED"
+          echo "# Updated: $(date -u +"%Y-%m-%d %H:%M UTC")" >> "$DETAILED"
+          echo "" >> "$DETAILED"
+
+          if [ -s scan/results/ping.txt ]; then
+
+            sort -n scan/results/ping.txt | \
+            head -25 | \
+            awk -F "|" '
+            {
+                rank++;
+
+                printf "JP%02d | %s | %s ms | %s:443\n",
+                rank,
+                $2,
+                $1,
+                $2;
+            }
+            ' >> "$DETAILED"
+
+          else
+
+            echo "No IPv6 Ping results." >> "$DETAILED"
+
+          fi
+
+          echo ""
+          cat "$DETAILED"
+
+      # ==================================================
+      # 8. 上传扫描结果
+      # ==================================================
+      - name: Upload scan results
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
+          name: cf-ipv6-ping-results
+          path: |
+            scan/
+            output/
 
-      - name: Install Playwright Chromium
-        if: steps.pw-cache.outputs.cache-hit != 'true'
-        run: python -m playwright install --with-deps chromium
-
-      - name: Collect Best CF IPV4
-        run: python3 .github/scripts/best-cf-ipv4-collector.py
-
-      - name: Commit update
+      # ==================================================
+      # 9. 提交结果
+      # ==================================================
+      - name: Commit results
+        shell: bash
         run: |
-          git config user.name "Lancelot"
-          git config user.email "Lancelot@example.com"
-          git add best-cf-ipv4.txt
-          git diff --cached --quiet && echo "No changes to commit" && exit 0
-          git commit -m "Best CF ipv4 list updated $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M')"
-          git pull --rebase
-          git push
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add output/best-cf-ipv6.txt
+          git add output/best-cf-ipv6-detail.txt
+
+          if git diff --cached --quiet; then
+
+            echo "No changes."
+
+          else
+
+            git commit -m "Update CF IPv6 Ping Top 25"
+
+            git push
+
+          fi
