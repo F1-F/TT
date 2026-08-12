@@ -65,4 +65,3 @@ jobs:
 
           git commit -m "Update Japan CF IPv4 nodes"
           git push
-```
