@@ -1,104 +1,240 @@
-name: 🌐 Cloudflare IPv6 优选节点生成 (JP)
+name: CF IPv6 JP Best 25
 
 on:
-  schedule:
-    - cron: '0 3 * * *'      # 每天北京时间11点运行（UTC+8）
-  workflow_dispatch:          # 允许手动触发
+  workflow_dispatch:
+    inputs:
+      samples_per_prefix:
+        description: "每个 /48 随机抽样数量"
+        required: true
+        default: "1000"
+        type: string
+      ping_count:
+        description: "每个 IP 的 TCP 443 测试次数"
+        required: true
+        default: "2"
+        type: string
 
 permissions:
   contents: write
 
 jobs:
-  generate-proxies:
-    runs-on: ubuntu-latest
+  scan:
+    # GitHub-hosted Runner 不应假定具备可用的公网 IPv6。
+    # 若本 Runner 没有 IPv6，Workflow 会明确失败并提示改用具备公网 IPv6 的 self-hosted Runner。
+    runs-on: ubuntu-24.04
+
     steps:
-      - name: 📥 检出仓库
-        uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6
 
-      - name: 🐍 设置 Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: 🎲 生成 IPv6 地址池（两个 /48 段，每段随机3000个地址）
+      - name: Check IPv6 connectivity
+        shell: bash
         run: |
-          python3 << 'EOF'
-          import random, ipaddress
+          set -euo pipefail
+          if ! curl -6 --connect-timeout 5 --max-time 10 -sS https://api64.ipify.org >/tmp/ipv6.txt; then
+            echo "::error::当前 GitHub Runner 无可用公网 IPv6。请改用具备公网 IPv6 的 self-hosted Runner 后重跑。"
+            exit 1
+          fi
+          echo "Runner IPv6: $(cat /tmp/ipv6.txt)"
 
-          prefixes = ["2606:4700:5a::/48", "2606:4700:57::/48"]
-          count_per_prefix = 3000  # 每段生成的随机地址数
-
-          with open("ip.txt", "w") as f:
-              for p in prefixes:
-                  net = ipaddress.IPv6Network(p)
-                  # 取网络前缀的整数表示，随机生成后64位
-                  base = int(net.network_address)
-                  for _ in range(count_per_prefix):
-                      rand_suffix = random.getrandbits(64)
-                      addr = ipaddress.IPv6Address(base + rand_suffix)
-                      f.write(str(addr) + "\n")
-          print("ip.txt 已生成")
-          EOF
-
-      - name: ⬇️ 下载 CloudflareSpeedTest
+      - name: Install dependencies
+        shell: bash
         run: |
-          wget -q https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.2.5/CloudflareST_linux_amd64.tar.gz
-          tar -xzf CloudflareST_linux_amd64.tar.gz
-          chmod +x CloudflareST
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y python3 curl tar
 
-      - name: 🚀 开始测速（按延迟排序，取前25个IP，端口443）
+      - name: Download CloudflareSpeedTest
+        shell: bash
         run: |
-          ./CloudflareST \
-            -f ip.txt \
-            -url https://speed.cloudflare.com/__down?bytes=100000000 \
-            -n 25 \
-            -tl 0 \
-            -sl 0 \
-            -dn 0 \
-            -t 4 \
+          set -euo pipefail
+          mkdir -p tools
+          cd tools
+          curl -fsSL \
+            https://github.com/XIU2/CloudflareSpeedTest/releases/latest/download/cfst_linux_amd64.tar.gz \
+            -o cfst.tar.gz
+          tar -xzf cfst.tar.gz
+          chmod +x cfst
+          ./cfst -h | head -n 5
+
+      - name: Generate IPv6 sample list
+        env:
+          SAMPLES_PER_PREFIX: ${{ inputs.samples_per_prefix }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import ipaddress
+          import os
+          import secrets
+
+          prefixes = [
+              ipaddress.IPv6Network("2606:4700:5a::/48"),
+              ipaddress.IPv6Network("2606:4700:57::/48"),
+          ]
+
+          n = int(os.environ.get("SAMPLES_PER_PREFIX", "1000"))
+          if n < 1 or n > 10000:
+              raise SystemExit("samples_per_prefix 必须在 1~10000 之间")
+
+          seen = set()
+
+          with open("ipv6.txt", "w", encoding="utf-8") as f:
+              for net in prefixes:
+                  added = 0
+                  while added < n:
+                      host_bits = 128 - net.prefixlen
+                      addr_int = int(net.network_address) | secrets.randbits(host_bits)
+                      addr = ipaddress.IPv6Address(addr_int)
+                      if addr in seen:
+                          continue
+                      seen.add(addr)
+                      f.write(f"{addr}\n")
+                      added += 1
+
+          print(f"Generated {len(seen)} IPv6 targets")
+          PY
+
+          wc -l ipv6.txt
+          head -n 10 ipv6.txt
+
+      - name: TCP 443 latency test
+        env:
+          PING_COUNT: ${{ inputs.ping_count }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p result
+
+          # -f: 从文件读取 IPv6
+          # -tp 443: 固定测试 TCP 443
+          # -n 200: 并发测试线程
+          # -t: 单 IP 测试次数
+          # -tl 9999: 不用较低延迟阈值提前过滤
+          # -p 0: 不依赖终端摘要，后续统一读取 CSV
+          ./tools/cfst \
+            -f ipv6.txt \
             -tp 443 \
-            -sort latency
-          # 参数解释：
-          # -n 25     : 最终输出前25个最快的IP
-          # -tl 0     : 不限制延迟上限
-          # -sl 0     : 不限制下载速度下限
-          # -dn 0     : 不限制下载速度上限
-          # -t 4      : 测速线程数
-          # -tp 443   : 指定测速端口为443
-          # -sort latency : 严格按延迟（Ping）排序
+            -n 200 \
+            -t "${PING_COUNT}" \
+            -tl 9999 \
+            -p 0 \
+            -o result/result.csv
 
-      - name: 📝 生成 Clash 节点 YAML (JP 01 ~ JP 25)
+          test -s result/result.csv
+          head -n 10 result/result.csv || true
+
+      - name: Build top 25 JP list
+        shell: bash
         run: |
-          # 如果你的代理协议不同，请修改下面模板中的 type/uuid/path/host 等参数
-          echo "proxies:" > proxies.yaml
-          index=1
-          # 跳过 CSV 第一行表头，取 IP 列（默认第一列）
-          tail -n +2 result.csv | head -n 25 | while IFS=, read -r ip rest; do
-              name=$(printf "JP %02d" $index)   # JP 01, JP 02 ...
-              cat >> proxies.yaml << END
-            - name: "${name}"
-              type: vmess
-              server: "${ip}"
-              port: 443
-              uuid: YOUR_UUID_HERE
-              alterId: 0
-              cipher: auto
-              network: ws
-              ws-opts:
-                path: /your-path
-                headers:
-                  Host: your-sni-domain.com
-              tls: true
-              servername: your-sni-domain.com
-          END
-              index=$((index + 1))
-          done
-          echo "✅ 已生成 proxies.yaml（共 $(($index-1)) 条节点）"
+          set -euo pipefail
 
-      - name: 📤 提交结果到仓库
-        uses: stefanzweifel/git-auto-commit-action@v5
+          python3 - <<'PY'
+          import csv
+          import ipaddress
+          from pathlib import Path
+
+          src = Path("result/result.csv")
+          out = Path("result/best-cf-ipv6-jp.txt")
+          json_out = Path("result/best-cf-ipv6-jp.json")
+
+          rows = []
+          with src.open("r", encoding="utf-8-sig", newline="") as f:
+              reader = csv.DictReader(f)
+              for row in reader:
+                  try:
+                      ip = row.get("IP 地址") or row.get("IP") or row.get("IP Address")
+                      loss = row.get("丢包率") or row.get("Packet Loss") or row.get("Loss")
+                      latency = row.get("平均延迟") or row.get("Average Latency") or row.get("Latency")
+                      if not ip or latency is None:
+                          continue
+
+                      ipaddress.IPv6Address(ip.strip())
+                      latency_v = float(latency)
+                      loss_v = float(loss or 0)
+
+                      # 优先使用 0% 丢包结果，再按平均延迟从低到高排序。
+                      rows.append({
+                          "ip": ip.strip(),
+                          "latency": latency_v,
+                          "loss": loss_v,
+                          "raw": row,
+                      })
+                  except (ValueError, TypeError):
+                      continue
+
+          # 先取 0% 丢包，再按延迟；若不足 25 个，再用其他可达结果补齐。
+          loss_free = [r for r in rows if r["loss"] == 0.0]
+          others = [r for r in rows if r["loss"] != 0.0]
+
+          loss_free.sort(key=lambda x: (x["latency"], x["loss"], x["ip"]))
+          others.sort(key=lambda x: (x["loss"], x["latency"], x["ip"]))
+
+          selected = (loss_free + others)[:25]
+
+          if len(selected) < 25:
+              raise SystemExit(
+                  f"有效 TCP/443 IPv6 数量不足 25 个，当前只有 {len(selected)} 个。"
+              )
+
+          text_lines = []
+          json_rows = []
+
+          for idx, item in enumerate(selected, start=1):
+              name = f"JP{idx:02d}"
+              # 保持与原 best-cf-ipv4.txt 类似的 IP:端口#标识形式。
+              line = f"{item['ip']}:443#{name}"
+              text_lines.append(line)
+              json_rows.append({
+                  "name": name,
+                  "ip": item["ip"],
+                  "port": 443,
+                  "latency_ms": item["latency"],
+                  "packet_loss_percent": item["loss"],
+                  "url": f"[{item['ip']}]:443",
+              })
+
+          out.write_text(
+              "#25 best IPv6 nodes, TCP/443 latency sorted\n"
+              + "\n".join(text_lines) + "\n",
+              encoding="utf-8",
+          )
+
+          import json
+          json_out.write_text(
+              json.dumps(json_rows, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          print(out.read_text(encoding="utf-8"))
+          PY
+
+      - name: Publish artifacts
+        uses: actions/upload-artifact@v4
         with:
-          commit_message: "🤖 更新优选节点 [skip ci]"
-          file_pattern: "proxies.yaml result.csv ip.txt"
-          commit_user_name: "github-actions[bot]"
-          commit_user_email: "github-actions[bot]@users.noreply.github.com"
+          name: best-cf-ipv6-jp
+          path: |
+            result/best-cf-ipv6-jp.txt
+            result/best-cf-ipv6-jp.json
+            result/result.csv
+            ipv6.txt
+
+      - name: Commit generated list
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          mkdir -p data
+          cp result/best-cf-ipv6-jp.txt data/best-cf-ipv6-jp.txt
+          cp result/best-cf-ipv6-jp.json data/best-cf-ipv6-jp.json
+
+          git add data/best-cf-ipv6-jp.txt data/best-cf-ipv6-jp.json
+
+          if git diff --cached --quiet; then
+            echo "No changes."
+          else
+            git commit -m "Update best 25 CF IPv6 JP nodes"
+            git push
+          fi
