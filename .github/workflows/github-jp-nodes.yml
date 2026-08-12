@@ -1,12 +1,12 @@
-name: GitHub Japan Nodes Collector
+name: GitHub Japan CF Nodes Top 25
 
 on:
+  # 每 3 小时运行一次
+  # 使用 17 分钟避免整点高峰
   schedule:
-    # 每 3 小时运行一次
-    # 使用 17 分钟避开整点高峰
     - cron: '17 */3 * * *'
 
-  # GitHub Actions 页面手动运行
+  # 支持 GitHub Actions 页面手动运行
   workflow_dispatch:
 
 permissions:
@@ -18,15 +18,15 @@ jobs:
 
     steps:
 
-      # ==========================================
-      # 1. Checkout
-      # ==========================================
+      # ============================================================
+      # 1. 获取当前仓库
+      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ==========================================
-      # 2. 搜索 GitHub 最近 12 小时节点
-      # ==========================================
+      # ============================================================
+      # 2. 搜索 GitHub 最近 12 小时更新的公开代码
+      # ============================================================
       - name: Search recent GitHub nodes
         env:
           GH_TOKEN: ${{ github.token }}
@@ -34,55 +34,52 @@ jobs:
         run: |
           set -euo pipefail
 
-          OUTPUT="github-jp-nodes.txt"
           RAW_DATA="github-node-source.tmp"
           REPOS="github-repositories.tmp"
 
-          # 清理旧临时文件
-          rm -f "$RAW_DATA"
-          rm -f "$REPOS"
+          rm -f "$RAW_DATA" "$REPOS"
+          touch "$RAW_DATA" "$REPOS"
 
-          touch "$RAW_DATA"
-          touch "$REPOS"
-
-          # ------------------------------------------
+          # --------------------------------------------------------
           # 当前 UTC 时间
-          # ------------------------------------------
+          # --------------------------------------------------------
           NOW=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
-          # 12 小时前
+          # --------------------------------------------------------
+          # 12 小时以前
+          # --------------------------------------------------------
           SINCE=$(date -u -d '12 hours ago' '+%Y-%m-%dT%H:%M:%SZ')
 
           echo "=========================================="
-          echo "GitHub Japan Node Collector"
+          echo "GitHub Japan CF Node Collector"
           echo "=========================================="
           echo "Current UTC : $NOW"
           echo "Search since: $SINCE"
           echo ""
 
-          # ==========================================
+          # --------------------------------------------------------
           # 搜索关键词
-          # ==========================================
+          # --------------------------------------------------------
           QUERIES=(
             '"#JP"'
             '"#Japan"'
             '"🇯🇵"'
             '"JP 🇯🇵"'
-            '"Japan"'
-            '"日本"'
-            '"CF"'
-            '"Cloudflare"'
             '"443#JP"'
             '"2053#JP"'
             '"8443#JP"'
             '"2083#JP"'
             '"2087#JP"'
             '"2096#JP"'
+            '"Japan"'
+            '"日本"'
+            '"Cloudflare"'
+            '"CF"'
           )
 
-          # ==========================================
-          # GitHub Search
-          # ==========================================
+          # --------------------------------------------------------
+          # GitHub Code Search
+          # --------------------------------------------------------
           for QUERY in "${QUERIES[@]}"; do
 
             echo ""
@@ -90,18 +87,13 @@ jobs:
             echo "Searching: $QUERY"
             echo "------------------------------------------"
 
-            # URL encode
             ENCODED_QUERY=$(python3 -c \
               "import urllib.parse; print(urllib.parse.quote('''$QUERY'''))")
 
-            # ----------------------------------------
-            # 只搜索最近 12 小时更新的代码
-            # ----------------------------------------
             SEARCH_QUERY="${ENCODED_QUERY}+pushed:%3E%3D${SINCE}"
 
+            # 每个关键词最多搜索 3 页
             for PAGE in 1 2 3; do
-
-              echo "Page: $PAGE"
 
               RESPONSE=$(curl -fsSL \
                 --retry 3 \
@@ -114,58 +106,59 @@ jobs:
                 || true)
 
               if [ -z "$RESPONSE" ]; then
-                echo "Empty response"
+                echo "Empty API response."
                 break
               fi
 
-              # ----------------------------------------
-              # 检查 API 是否返回错误
-              # ----------------------------------------
+              # ------------------------------------------------------
+              # GitHub API 错误
+              # ------------------------------------------------------
               if echo "$RESPONSE" | jq -e '.message' >/dev/null 2>&1; then
-                echo "GitHub API message:"
+                echo "GitHub API:"
                 echo "$RESPONSE" | jq -r '.message'
                 break
               fi
 
-              # ----------------------------------------
+              # ------------------------------------------------------
               # 保存：
-              # owner/repository|path|branch
-              # ----------------------------------------
-              echo "$RESPONSE" \
-                | jq -r '
-                    .items[]?
-                    | select(.repository.private == false)
-                    | [
-                        .repository.full_name,
-                        .path,
-                        (.repository.default_branch // "main")
-                      ]
-                    | @tsv
-                  ' \
-                >> "$REPOS"
+              #
+              # repository
+              # path
+              # default branch
+              # ------------------------------------------------------
+              echo "$RESPONSE" |
+                jq -r '
+                  .items[]?
+                  | select(.repository.private == false)
+                  | [
+                      .repository.full_name,
+                      .path,
+                      (.repository.default_branch // "main")
+                    ]
+                  | @tsv
+                ' >> "$REPOS"
 
               COUNT=$(echo "$RESPONSE" | jq '.items | length')
 
-              echo "Results: $COUNT"
+              echo "Page $PAGE: $COUNT results"
 
-              # 少于 100 表示没有下一页
+              # 不满 100 条，说明没有下一页
               if [ "$COUNT" -lt 100 ]; then
                 break
               fi
 
-              # 避免请求过快
               sleep 3
 
             done
 
-            # 避免 Search API 请求过快
+            # 避免 Code Search 请求过快
             sleep 5
 
           done
 
-          # ==========================================
-          # 3. 去重候选文件
-          # ==========================================
+          # --------------------------------------------------------
+          # 候选文件去重
+          # --------------------------------------------------------
           sort -u "$REPOS" > "${REPOS}.unique"
 
           echo ""
@@ -175,23 +168,23 @@ jobs:
 
           wc -l "${REPOS}.unique"
 
-          # ==========================================
-          # 4. 下载候选文件
-          # ==========================================
+          # ========================================================
+          # 3. 下载候选文件
+          # ========================================================
+
           while IFS=$'\t' read -r REPO PATH BRANCH; do
 
             [ -z "$REPO" ] && continue
             [ -z "$PATH" ] && continue
 
-            echo "Downloading:"
-            echo "  Repository: $REPO"
-            echo "  File      : $PATH"
-
-            # GitHub raw URL
             ENCODED_PATH=$(python3 -c \
               "import urllib.parse; print(urllib.parse.quote('''$PATH'''))")
 
             RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/${ENCODED_PATH}"
+
+            echo "Downloading:"
+            echo "  Repository: $REPO"
+            echo "  File      : $PATH"
 
             curl -fsSL \
               --retry 2 \
@@ -203,46 +196,50 @@ jobs:
 
             echo "" >> "$RAW_DATA"
 
-            # 防止请求过快
             sleep 0.5
 
           done < "${REPOS}.unique"
 
-          # ==========================================
-          # 5. 提取 IP:PORT + 日本标识
-          # ==========================================
-          echo ""
-          echo "=========================================="
-          echo "Extracting Japan nodes..."
-          echo "=========================================="
+      # ============================================================
+      # 4. 提取日本 IPv4 节点
+      # ============================================================
+      - name: Extract Japan IPv4 nodes
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          CANDIDATES="github-jp-candidates.tmp"
+          CANDIDATES="jp-candidates.tmp"
 
           rm -f "$CANDIDATES"
           touch "$CANDIDATES"
 
-          if [ -s "$RAW_DATA" ]; then
+          if [ -s github-node-source.tmp ]; then
 
-            # ----------------------------------------
-            # 提取包含日本标识的 IPv4 节点
-            # ----------------------------------------
+            # ------------------------------------------------------
+            # 找到包含：
+            #
+            # #JP
+            # #Japan
+            # 🇯🇵
+            # 日本
+            #
+            # 的节点行
+            # ------------------------------------------------------
             grep -Ei \
               '([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]{1,5}.*(#JP|#Japan|🇯🇵|日本)' \
-              "$RAW_DATA" \
-              | grep -oE \
+              github-node-source.tmp |
+            grep -oE \
               '([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]{1,5}' \
               > "$CANDIDATES" \
               || true
 
           fi
 
-          # ==========================================
-          # 6. 验证 IP 和端口
-          # ==========================================
-          VALID="github-jp-valid.tmp"
+          # --------------------------------------------------------
+          # 验证 IP / Port
+          # --------------------------------------------------------
 
-          rm -f "$VALID"
-          touch "$VALID"
+          > jp-nodes.txt
 
           while IFS= read -r NODE; do
 
@@ -251,88 +248,232 @@ jobs:
             IP="${NODE%:*}"
             PORT="${NODE##*:}"
 
-            # IP 必须是 IPv4
-            if ! [[ "$IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              continue
-            fi
+            # IPv4 格式
+            [[ "$IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
 
-            # 端口必须是数字
-            if ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
-              continue
-            fi
-
-            # 检查 IP 四段
-            VALID_IP=true
+            # Port 格式
+            [[ "$PORT" =~ ^[0-9]+$ ]] || continue
 
             IFS='.' read -r A B C D <<< "$IP"
 
-            for OCTET in "$A" "$B" "$C" "$D"; do
-              if [ "$OCTET" -lt 0 ] || [ "$OCTET" -gt 255 ]; then
-                VALID_IP=false
-                break
-              fi
-            done
+            # IP 每段必须 0-255
+            if [ "$A" -le 255 ] &&
+               [ "$B" -le 255 ] &&
+               [ "$C" -le 255 ] &&
+               [ "$D" -le 255 ] &&
+               [ "$PORT" -ge 1 ] &&
+               [ "$PORT" -le 65535 ]; then
 
-            if [ "$VALID_IP" = false ]; then
-              continue
+              echo "${IP}:${PORT}#JP" >> jp-nodes.txt
+
             fi
-
-            # 端口范围
-            if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
-              continue
-            fi
-
-            echo "${IP}:${PORT}#JP" >> "$VALID"
 
           done < "$CANDIDATES"
 
-          # ==========================================
-          # 7. 去重 + 排序
-          # ==========================================
-          sort -u "$VALID" > github-jp-nodes.new
-
-          COUNT=$(wc -l < github-jp-nodes.new)
+          # 去重
+          sort -u jp-nodes.txt -o jp-nodes.txt
 
           echo ""
           echo "=========================================="
-          echo "Japan nodes found: $COUNT"
+          echo "Unique Japan nodes"
           echo "=========================================="
 
-          cat github-jp-nodes.new || true
+          wc -l jp-nodes.txt
 
-          # ==========================================
-          # 8. 防止搜索失败导致旧文件被清空
-          #
-          # 如果本轮没有找到节点：
-          # 保留上一轮 github-jp-nodes.txt
-          # ==========================================
-          if [ "$COUNT" -eq 0 ]; then
+      # ============================================================
+      # 5. TCP + HTTPS 实际测试
+      # ============================================================
+      - name: Test Japan nodes
+        shell: bash
+        run: |
+          set -u
+
+          INPUT="jp-nodes.txt"
+          RESULTS="jp-speed-results.txt"
+
+          rm -f "$RESULTS"
+          touch "$RESULTS"
+
+          TOTAL=$(wc -l < "$INPUT")
+
+          echo "=========================================="
+          echo "Testing $TOTAL Japan nodes"
+          echo "=========================================="
+
+          COUNT=0
+
+          while IFS= read -r NODE; do
+
+            [ -z "$NODE" ] && continue
+
+            COUNT=$((COUNT + 1))
+
+            HOST="${NODE%%:*}"
+
+            PORT="${NODE#*:}"
+            PORT="${PORT%%#*}"
 
             echo ""
-            echo "No Japan nodes found."
-            echo "Keeping previous output file."
+            echo "[$COUNT/$TOTAL] $HOST:$PORT"
 
-            rm -f github-jp-nodes.new
+            # ------------------------------------------------------
+            # TCP 连接测试
+            # ------------------------------------------------------
 
-          else
+            TCP_START=$(date +%s%3N)
 
-            mv github-jp-nodes.new "$OUTPUT"
+            if timeout 4 bash -c \
+              ":</dev/tcp/$HOST/$PORT" \
+              >/dev/null 2>&1; then
+
+              TCP_END=$(date +%s%3N)
+
+              TCP_MS=$((TCP_END - TCP_START))
+
+              echo "TCP: ${TCP_MS} ms"
+
+            else
+
+              echo "TCP: FAILED"
+
+              continue
+
+            fi
+
+            # ------------------------------------------------------
+            # HTTPS 测试
+            #
+            # 强制 Cloudflare 域名解析到当前 IP
+            # ------------------------------------------------------
+
+            CURL_OUTPUT=$(
+              curl \
+                --silent \
+                --show-error \
+                --output /dev/null \
+                --write-out '%{http_code} %{time_connect} %{time_starttransfer} %{time_total}' \
+                --connect-timeout 4 \
+                --max-time 7 \
+                --resolve "www.cloudflare.com:443:${HOST}" \
+                "https://www.cloudflare.com/cdn-cgi/trace" \
+                2>/dev/null
+            ) || true
+
+            if [ -z "$CURL_OUTPUT" ]; then
+
+              echo "HTTPS: FAILED"
+
+              continue
+
+            fi
+
+            HTTP_CODE=$(echo "$CURL_OUTPUT" | awk '{print $1}')
+            TIME_CONNECT=$(echo "$CURL_OUTPUT" | awk '{print $2}')
+            TIME_TTFB=$(echo "$CURL_OUTPUT" | awk '{print $3}')
+            TIME_TOTAL=$(echo "$CURL_OUTPUT" | awk '{print $4}')
+
+            # ------------------------------------------------------
+            # 只接受 2xx / 3xx
+            # ------------------------------------------------------
+
+            if [[ "$HTTP_CODE" =~ ^(2|3)[0-9][0-9]$ ]]; then
+
+              CONNECT_MS=$(awk \
+                -v t="$TIME_CONNECT" \
+                'BEGIN { printf "%.0f", t * 1000 }')
+
+              TTFB_MS=$(awk \
+                -v t="$TIME_TTFB" \
+                'BEGIN { printf "%.0f", t * 1000 }')
+
+              TOTAL_MS=$(awk \
+                -v t="$TIME_TOTAL" \
+                'BEGIN { printf "%.0f", t * 1000 }')
+
+              echo "HTTP    : $HTTP_CODE"
+              echo "Connect : ${CONNECT_MS} ms"
+              echo "TTFB    : ${TTFB_MS} ms"
+              echo "Total   : ${TOTAL_MS} ms"
+
+              # ----------------------------------------------------
+              # 保存：
+              #
+              # HTTPS总耗时
+              # TCP耗时
+              # TTFB
+              # IP:PORT#JP
+              # ----------------------------------------------------
+
+              echo "$TOTAL_MS $TCP_MS $TTFB_MS $NODE" \
+                >> "$RESULTS"
+
+            else
+
+              echo "HTTPS HTTP CODE: $HTTP_CODE"
+
+            fi
+
+          done < "$INPUT"
+
+          echo ""
+          echo "=========================================="
+          echo "Working Japan nodes"
+          echo "=========================================="
+
+          wc -l "$RESULTS"
+
+      # ============================================================
+      # 6. 按速度排序并取最快 25 个
+      # ============================================================
+      - name: Select top 25 Japan nodes
+        shell: bash
+        run: |
+          set -e
+
+          OUTPUT="github-jp-nodes.txt"
+
+          # 如果本次完全没有可用节点
+          # 保留上一轮结果，不覆盖
+          if [ ! -s jp-speed-results.txt ]; then
+
+            echo "No working Japan nodes found."
+            echo "Keeping previous github-jp-nodes.txt"
+
+            exit 0
 
           fi
 
-          # ==========================================
-          # 9. 清理临时文件
-          # ==========================================
-          rm -f \
-            "$RAW_DATA" \
-            "$REPOS" \
-            "${REPOS}.unique" \
-            "$CANDIDATES" \
-            "$VALID"
+          echo "=========================================="
+          echo "Top 25 Japan nodes"
+          echo "=========================================="
 
-      # ==========================================
-      # 10. 提交 TXT
-      # ==========================================
+          # --------------------------------------------------------
+          # 排序规则：
+          #
+          # 第一优先级：HTTPS 总耗时
+          # 第二优先级：TCP 延迟
+          # 第三优先级：TTFB
+          # --------------------------------------------------------
+
+          sort -n \
+            -k1,1 \
+            -k2,2 \
+            -k3,3 \
+            jp-speed-results.txt |
+          head -n 25 |
+          awk '{print $4}' \
+            > "$OUTPUT"
+
+          echo ""
+          cat "$OUTPUT"
+
+          echo ""
+          echo "Selected nodes:"
+          wc -l < "$OUTPUT"
+
+      # ============================================================
+      # 7. 提交 TXT
+      # ============================================================
       - name: Commit updated TXT
         shell: bash
         run: |
@@ -344,10 +485,46 @@ jobs:
           git add github-jp-nodes.txt
 
           if git diff --cached --quiet; then
+
             echo "No changes detected."
+
             exit 0
+
           fi
 
-          git commit -m "Update GitHub Japan nodes"
+          git commit \
+            -m "Update Japan CF top 25 nodes"
 
           git push
+
+      # ============================================================
+      # 8. 显示测速结果
+      # ============================================================
+      - name: Show speed report
+        if: always()
+        shell: bash
+        run: |
+
+          echo ""
+          echo "=========================================="
+          echo "Japan CF Speed Report"
+          echo "=========================================="
+
+          if [ -f jp-speed-results.txt ]; then
+
+            echo ""
+            echo "HTTPS(ms) TCP(ms) TTFB(ms) NODE"
+            echo "------------------------------------------"
+
+            sort -n \
+              -k1,1 \
+              -k2,2 \
+              -k3,3 \
+              jp-speed-results.txt |
+            head -n 25
+
+          else
+
+            echo "No speed results."
+
+          fi
