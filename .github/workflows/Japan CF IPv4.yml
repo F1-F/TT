@@ -2,11 +2,9 @@
 name: Update Japan CF IPv4 Nodes
 
 on:
-  # 每 3 小时运行一次
   schedule:
     - cron: '17 */3 * * *'
 
-  # 支持手动运行
   workflow_dispatch:
 
 permissions:
@@ -17,11 +15,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 获取当前仓库
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 下载并筛选日本节点
       - name: Fetch and filter Japan nodes
         shell: bash
         run: |
@@ -35,10 +31,15 @@ jobs:
 
           echo "Filtering Japan (JP) nodes..."
 
-          # 保留完整的日本节点内容
-          # 例如：
-          # 3.169.7.2:443#JP 🇯🇵
-          grep '#JP ' source.txt > "$OUTPUT_FILE" || true
+          # 筛选日本节点
+          # 原始：
+          # 1.2.3.4:443#JP 🇯🇵
+          #
+          # 输出：
+          # 1.2.3.4:443#JP
+          grep '#JP ' source.txt \
+            | sed 's/ 🇯🇵.*$//' \
+            > "$OUTPUT_FILE"
 
           echo ""
           echo "Japan nodes:"
@@ -47,7 +48,6 @@ jobs:
           echo ""
           echo "Total Japan nodes: $(wc -l < "$OUTPUT_FILE")"
 
-      # 提交更新后的 TXT
       - name: Commit and push
         shell: bash
         run: |
