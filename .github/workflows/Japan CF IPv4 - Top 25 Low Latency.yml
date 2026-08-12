@@ -1,0 +1,428 @@
+```yaml
+name: Japan CF IPv4 - Top 25 Low Latency
+
+on:
+  schedule:
+    # 每 3 小时运行一次
+    - cron: "50 */3 * * *"
+
+  # 支持 GitHub Actions 页面手动运行
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: japan-cf-ipv4
+  cancel-in-progress: false
+
+jobs:
+  japan-cf-ipv4:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # ============================================================
+      # 1. Checkout
+      # ============================================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ============================================================
+      # 2. Setup Python
+      # ============================================================
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ============================================================
+      # 3. Download original LancelotRar best-cf-ips
+      # ============================================================
+      - name: Download latest CF IPv4 list
+        shell: bash
+        run: |
+          set -e
+
+          curl -fL \
+            --retry 5 \
+            --retry-delay 2 \
+            --connect-timeout 15 \
+            --max-time 60 \
+            "https://raw.githubusercontent.com/LancelotRar/best-cf-ips/main/best-cf-ipv4.txt" \
+            -o source-best-cf-ipv4.txt
+
+          echo "Downloaded source list:"
+          wc -l source-best-cf-ipv4.txt
+
+          echo "Japan nodes found:"
+          grep -E '#JP|🇯🇵' source-best-cf-ipv4.txt || true
+
+      # ============================================================
+      # 4. Filter Japan nodes + TCP latency test
+      # ============================================================
+      - name: Test Japan nodes and select Top 25
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import asyncio
+          import ipaddress
+          import re
+          import time
+          from pathlib import Path
+
+          SOURCE = Path("source-best-cf-ipv4.txt")
+          OUTPUT = Path("japan-cf-ipv4.txt")
+          OUTPUT_MD = Path("japan-cf-ipv4.md")
+          OUTPUT_LATENCY = Path("japan-cf-ipv4-latency.txt")
+
+          # ----------------------------------------------------------
+          # Configuration
+          # ----------------------------------------------------------
+          TOP_N = 25
+
+          # TCP connect timeout.
+          # 不建议设置过高，否则大量失效 IP 会拖慢 Workflow。
+          CONNECT_TIMEOUT = 3.0
+
+          # 最大并发测速数量
+          MAX_CONCURRENCY = 100
+
+          # Cloudflare HTTPS
+          TEST_PORT = 443
+
+          # ----------------------------------------------------------
+          # Extract Japanese nodes
+          # ----------------------------------------------------------
+          japan_nodes = []
+
+          for raw_line in SOURCE.read_text(
+              encoding="utf-8",
+              errors="ignore"
+          ).splitlines():
+
+              line = raw_line.strip()
+
+              if not line:
+                  continue
+
+              # 原项目格式类似：
+              #
+              # 1.2.3.4:443#JP 🇯🇵
+              #
+              # 同时兼容：
+              #
+              # 1.2.3.4:443#JP
+              if "#JP" not in line and "🇯🇵" not in line:
+                  continue
+
+              # 提取 IPv4
+              match = re.search(
+                  r"(?<![\d.])"
+                  r"((?:\d{1,3}\.){3}\d{1,3})"
+                  r":(\d{1,5})",
+                  line
+              )
+
+              if not match:
+                  continue
+
+              ip = match.group(1)
+              port = int(match.group(2))
+
+              # 验证 IPv4
+              try:
+                  ipaddress.IPv4Address(ip)
+              except ValueError:
+                  continue
+
+              if not (1 <= port <= 65535):
+                  continue
+
+              japan_nodes.append((ip, port, line))
+
+          # 去重
+          unique = {}
+
+          for ip, port, line in japan_nodes:
+              unique[(ip, port)] = line
+
+          japan_nodes = [
+              (ip, port, line)
+              for (ip, port), line in unique.items()
+          ]
+
+          print(f"Japan candidates: {len(japan_nodes)}")
+
+          if not japan_nodes:
+              raise SystemExit(
+                  "ERROR: No Japan (#JP / 🇯🇵) nodes found."
+              )
+
+          # ----------------------------------------------------------
+          # TCP latency test
+          # ----------------------------------------------------------
+          semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
+
+          async def test_node(ip, port, original):
+              async with semaphore:
+                  start = time.perf_counter()
+
+                  try:
+                      reader, writer = await asyncio.wait_for(
+                          asyncio.open_connection(
+                              ip,
+                              port,
+                              family=2
+                          ),
+                          timeout=CONNECT_TIMEOUT
+                      )
+
+                      elapsed = (
+                          time.perf_counter() - start
+                      ) * 1000
+
+                      writer.close()
+
+                      try:
+                          await writer.wait_closed()
+                      except Exception:
+                          pass
+
+                      return {
+                          "ip": ip,
+                          "port": port,
+                          "latency": elapsed,
+                          "original": original
+                      }
+
+                  except Exception:
+                      return None
+
+          async def main():
+              tasks = [
+                  test_node(ip, port, original)
+                  for ip, port, original in japan_nodes
+              ]
+
+              results = await asyncio.gather(*tasks)
+
+              alive = [
+                  item
+                  for item in results
+                  if item is not None
+              ]
+
+              # 按 TCP connect 延迟升序排列
+              alive.sort(
+                  key=lambda x: x["latency"]
+              )
+
+              top = alive[:TOP_N]
+
+              print()
+              print("=" * 70)
+              print("Japan Top 25")
+              print("=" * 70)
+
+              for index, item in enumerate(top, 1):
+                  print(
+                      f"{index:02d}. "
+                      f"{item['ip']}:{item['port']} "
+                      f"{item['latency']:.2f} ms"
+                  )
+
+              print("=" * 70)
+              print(
+                  f"Alive Japan nodes: {len(alive)}"
+              )
+              print(
+                  f"Selected nodes: {len(top)}"
+              )
+
+              # --------------------------------------------------------
+              # Output 1:
+              # japan-cf-ipv4.txt
+              #
+              # 纯节点地址，适合订阅/脚本读取
+              # --------------------------------------------------------
+              lines = []
+
+              lines.append(
+                  f"# Japan Top {len(top)} CF IPv4"
+              )
+
+              lines.append(
+                  "# Sorted by TCP latency from GitHub Actions runner"
+              )
+
+              lines.append("")
+
+              for item in top:
+                  lines.append(
+                      f"{item['ip']}:{item['port']}"
+                  )
+
+              OUTPUT.write_text(
+                  "\n".join(lines) + "\n",
+                  encoding="utf-8"
+              )
+
+              # --------------------------------------------------------
+              # Output 2:
+              # japan-cf-ipv4.md
+              #
+              # Markdown 格式
+              # --------------------------------------------------------
+              md = []
+
+              md.append(
+                  f"# Japan CF IPv4 - Top {len(top)}"
+              )
+
+              md.append("")
+
+              md.append(
+                  "> 按 GitHub Actions Runner TCP 443 延迟从低到高排序"
+              )
+
+              md.append("")
+
+              for index, item in enumerate(top, 1):
+                  url = (
+                      f"https://{item['ip']}:{item['port']}"
+                  )
+
+                  md.append(
+                      f"{index}. "
+                      f"[{url}]({url}) — "
+                      f"{item['latency']:.2f} ms"
+                  )
+
+              OUTPUT_MD.write_text(
+                  "\n".join(md) + "\n",
+                  encoding="utf-8"
+              )
+
+              # --------------------------------------------------------
+              # Output 3:
+              # japan-cf-ipv4-latency.txt
+              #
+              # IP + 延迟
+              # --------------------------------------------------------
+              latency_lines = []
+
+              latency_lines.append(
+                  f"# Japan Top {len(top)}"
+              )
+
+              latency_lines.append(
+                  "# IP:PORT | TCP latency"
+              )
+
+              latency_lines.append("")
+
+              for index, item in enumerate(top, 1):
+                  latency_lines.append(
+                      f"{index:02d}. "
+                      f"{item['ip']}:{item['port']} | "
+                      f"{item['latency']:.2f} ms"
+                  )
+
+              OUTPUT_LATENCY.write_text(
+                  "\n".join(latency_lines) + "\n",
+                  encoding="utf-8"
+              )
+
+              # --------------------------------------------------------
+              # GitHub Actions summary
+              # --------------------------------------------------------
+              summary = []
+
+              summary.append(
+                  f"## 🇯🇵 Japan CF IPv4 Top {len(top)}"
+              )
+
+              summary.append("")
+
+              summary.append(
+                  "| # | IP | Port | TCP Latency |"
+              )
+
+              summary.append(
+                  "|---:|---|---:|---:|"
+              )
+
+              for index, item in enumerate(top, 1):
+                  summary.append(
+                      f"| {index} | "
+                      f"`{item['ip']}` | "
+                      f"{item['port']} | "
+                      f"{item['latency']:.2f} ms |"
+                  )
+
+              summary.append("")
+
+              Path(
+                  "/tmp/summary.md"
+              ).write_text(
+                  "\n".join(summary),
+                  encoding="utf-8"
+              )
+
+              with open(
+                  "/tmp/GITHUB_STEP_SUMMARY",
+                  "w",
+                  encoding="utf-8"
+              ) as f:
+                  f.write("\n".join(summary))
+
+          asyncio.run(main())
+          PY
+
+          # 写入 GitHub Actions Summary
+          cat /tmp/GITHUB_STEP_SUMMARY >> "$GITHUB_STEP_SUMMARY"
+
+      # ============================================================
+      # 5. Show generated files
+      # ============================================================
+      - name: Show generated result
+        shell: bash
+        run: |
+          echo "================ japan-cf-ipv4.txt ================"
+          cat japan-cf-ipv4.txt
+
+          echo
+          echo "================ japan-cf-ipv4.md ================"
+          cat japan-cf-ipv4.md
+
+          echo
+          echo "================ japan-cf-ipv4-latency.txt ================"
+          cat japan-cf-ipv4-latency.txt
+
+      # ============================================================
+      # 6. Commit result
+      # ============================================================
+      - name: Commit and push
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add \
+            japan-cf-ipv4.txt \
+            japan-cf-ipv4.md \
+            japan-cf-ipv4-latency.txt
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit \
+            -m "Update Japan CF IPv4 Top 25"
+
+          git push
+```
