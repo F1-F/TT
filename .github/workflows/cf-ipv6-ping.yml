@@ -1,298 +1,104 @@
-name: CF IPv6 Ping Top 25
-
-run-name: CF IPv6 Ping Scan - ${{ github.run_number }}
+name: 🌐 Cloudflare IPv6 优选节点生成 (JP)
 
 on:
-  workflow_dispatch:
-
   schedule:
-    # 每 6 小时运行一次
-    # Asia/Tokyo 时区
-    - cron: "17 */6 * * *"
-      timezone: "Asia/Tokyo"
+    - cron: '0 3 * * *'      # 每天北京时间11点运行（UTC+8）
+  workflow_dispatch:          # 允许手动触发
 
 permissions:
   contents: write
 
-concurrency:
-  group: cf-ipv6-ping
-  cancel-in-progress: true
-
 jobs:
-  scan-ipv6:
-    name: Scan Cloudflare IPv6
+  generate-proxies:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
     steps:
-
-      # ==================================================
-      # 1. Checkout
-      # ==================================================
-      - name: Checkout repository
+      - name: 📥 检出仓库
         uses: actions/checkout@v4
 
-      # ==================================================
-      # 2. 检查 IPv6
-      # ==================================================
-      - name: Check IPv6 connectivity
-        shell: bash
-        run: |
-          echo "======================================"
-          echo "IPv6 Connectivity Check"
-          echo "======================================"
-
-          ip -6 route || true
-
-          echo ""
-          echo "Testing IPv6..."
-
-          if ping -6 -c 2 -W 2 2606:4700:4700::1111; then
-            echo "IPv6 connectivity: OK"
-          else
-            echo "IPv6 connectivity: FAILED"
-            echo ""
-            echo "GitHub Runner may not have usable IPv6."
-          fi
-
-      # ==================================================
-      # 3. 安装 Ping
-      # ==================================================
-      - name: Install dependencies
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            iputils-ping \
-            coreutils \
-            python3
-
-      # ==================================================
-      # 4. 生成随机 IPv6
-      # ==================================================
-      - name: Generate random IPv6 candidates
-        shell: bash
-        run: |
-
-          mkdir -p scan
-
-          python3 << 'PY'
-          import ipaddress
-          import secrets
-
-          NETWORKS = [
-              ipaddress.IPv6Network("2606:4700:5a::/48"),
-              ipaddress.IPv6Network("2606:4700:57::/48"),
-          ]
-
-          # 每个 /48 随机抽取 500 个
-          PER_NETWORK = 500
-
-          output = []
-
-          for network in NETWORKS:
-
-              prefix = int(network.network_address)
-              host_bits = 128 - network.prefixlen
-
-              for _ in range(PER_NETWORK):
-
-                  host = secrets.randbits(host_bits)
-
-                  ip_int = prefix | host
-
-                  ip = ipaddress.IPv6Address(ip_int)
-
-                  output.append(str(ip))
-
-          # 去重
-          output = sorted(set(output))
-
-          with open("scan/candidates.txt", "w") as f:
-              for ip in output:
-                  f.write(ip + "\n")
-
-          print("Generated IPv6 candidates:", len(output))
-          PY
-
-          echo ""
-          echo "Candidate count:"
-          wc -l scan/candidates.txt
-
-      # ==================================================
-      # 5. IPv6 Ping
-      # ==================================================
-      - name: IPv6 Ping scan
-        shell: bash
-        run: |
-
-          mkdir -p scan/results
-
-          echo "======================================"
-          echo "Starting IPv6 Ping Scan"
-          echo "======================================"
-          echo "Port: 443"
-          echo "Candidates: 1000"
-          echo ""
-
-          cat scan/candidates.txt | \
-          xargs -P 32 -I {} bash -c '
-
-            IP="{}"
-
-            RESULT=$(ping -6 \
-              -c 2 \
-              -W 1 \
-              "$IP" 2>/dev/null)
-
-            if [ $? -eq 0 ]; then
-
-              AVG=$(echo "$RESULT" | \
-                awk -F "/" "/^rtt|^round-trip/ {print \$5}")
-
-              if [ -n "$AVG" ]; then
-
-                echo "$AVG|$IP" >> scan/results/ping.txt
-
-              fi
-
-            fi
-          '
-
-          echo ""
-          echo "======================================"
-          echo "Ping scan finished"
-          echo "======================================"
-
-          if [ -s scan/results/ping.txt ]; then
-
-            sort -n scan/results/ping.txt | head -25
-
-          else
-
-            echo "No IPv6 Ping results."
-
-          fi
-
-      # ==================================================
-      # 6. 生成 Top 25
-      # ==================================================
-      - name: Generate Top 25 IPv6 list
-        shell: bash
-        run: |
-
-          mkdir -p output
-
-          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
-
-          OUTPUT="output/best-cf-ipv6.txt"
-
-          echo "#25 bestips updated at $TIMESTAMP" > "$OUTPUT"
-          echo "# Source: 2606:4700:5a::/48" >> "$OUTPUT"
-          echo "# Source: 2606:4700:57::/48" >> "$OUTPUT"
-          echo "# Port: 443" >> "$OUTPUT"
-          echo "# Sorted by IPv6 ICMP Ping latency" >> "$OUTPUT"
-          echo "" >> "$OUTPUT"
-
-          if [ ! -s scan/results/ping.txt ]; then
-
-            echo "# No IPv6 Ping results available" >> "$OUTPUT"
-
-            echo "No IPv6 Ping results."
-
-            exit 0
-
-          fi
-
-          sort -n scan/results/ping.txt | \
-          head -25 | \
-          awk -F "|" '
-          {
-              rank++;
-
-              printf "%s:443#JP%02d\n", $2, rank;
-          }
-          ' >> "$OUTPUT"
-
-          echo ""
-          echo "======================================"
-          echo "Top 25 IPv6"
-          echo "======================================"
-
-          cat "$OUTPUT"
-
-      # ==================================================
-      # 7. 生成详细结果
-      # ==================================================
-      - name: Generate detailed result
-        shell: bash
-        run: |
-
-          DETAILED="output/best-cf-ipv6-detail.txt"
-
-          echo "# Cloudflare IPv6 Ping Results" > "$DETAILED"
-          echo "# Port: 443" >> "$DETAILED"
-          echo "# Updated: $(date -u +"%Y-%m-%d %H:%M UTC")" >> "$DETAILED"
-          echo "" >> "$DETAILED"
-
-          if [ -s scan/results/ping.txt ]; then
-
-            sort -n scan/results/ping.txt | \
-            head -25 | \
-            awk -F "|" '
-            {
-                rank++;
-
-                printf "JP%02d | %s | %s ms | %s:443\n",
-                rank,
-                $2,
-                $1,
-                $2;
-            }
-            ' >> "$DETAILED"
-
-          else
-
-            echo "No IPv6 Ping results." >> "$DETAILED"
-
-          fi
-
-          echo ""
-          cat "$DETAILED"
-
-      # ==================================================
-      # 8. 上传扫描结果
-      # ==================================================
-      - name: Upload scan results
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: 🐍 设置 Python
+        uses: actions/setup-python@v5
         with:
-          name: cf-ipv6-ping-results
-          path: |
-            scan/
-            output/
+          python-version: '3.11'
 
-      # ==================================================
-      # 9. 提交结果
-      # ==================================================
-      - name: Commit results
-        shell: bash
+      - name: 🎲 生成 IPv6 地址池（两个 /48 段，每段随机3000个地址）
         run: |
+          python3 << 'EOF'
+          import random, ipaddress
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          prefixes = ["2606:4700:5a::/48", "2606:4700:57::/48"]
+          count_per_prefix = 3000  # 每段生成的随机地址数
 
-          git add output/best-cf-ipv6.txt
-          git add output/best-cf-ipv6-detail.txt
+          with open("ip.txt", "w") as f:
+              for p in prefixes:
+                  net = ipaddress.IPv6Network(p)
+                  # 取网络前缀的整数表示，随机生成后64位
+                  base = int(net.network_address)
+                  for _ in range(count_per_prefix):
+                      rand_suffix = random.getrandbits(64)
+                      addr = ipaddress.IPv6Address(base + rand_suffix)
+                      f.write(str(addr) + "\n")
+          print("ip.txt 已生成")
+          EOF
 
-          if git diff --cached --quiet; then
+      - name: ⬇️ 下载 CloudflareSpeedTest
+        run: |
+          wget -q https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.2.5/CloudflareST_linux_amd64.tar.gz
+          tar -xzf CloudflareST_linux_amd64.tar.gz
+          chmod +x CloudflareST
 
-            echo "No changes."
+      - name: 🚀 开始测速（按延迟排序，取前25个IP，端口443）
+        run: |
+          ./CloudflareST \
+            -f ip.txt \
+            -url https://speed.cloudflare.com/__down?bytes=100000000 \
+            -n 25 \
+            -tl 0 \
+            -sl 0 \
+            -dn 0 \
+            -t 4 \
+            -tp 443 \
+            -sort latency
+          # 参数解释：
+          # -n 25     : 最终输出前25个最快的IP
+          # -tl 0     : 不限制延迟上限
+          # -sl 0     : 不限制下载速度下限
+          # -dn 0     : 不限制下载速度上限
+          # -t 4      : 测速线程数
+          # -tp 443   : 指定测速端口为443
+          # -sort latency : 严格按延迟（Ping）排序
 
-          else
+      - name: 📝 生成 Clash 节点 YAML (JP 01 ~ JP 25)
+        run: |
+          # 如果你的代理协议不同，请修改下面模板中的 type/uuid/path/host 等参数
+          echo "proxies:" > proxies.yaml
+          index=1
+          # 跳过 CSV 第一行表头，取 IP 列（默认第一列）
+          tail -n +2 result.csv | head -n 25 | while IFS=, read -r ip rest; do
+              name=$(printf "JP %02d" $index)   # JP 01, JP 02 ...
+              cat >> proxies.yaml << END
+            - name: "${name}"
+              type: vmess
+              server: "${ip}"
+              port: 443
+              uuid: YOUR_UUID_HERE
+              alterId: 0
+              cipher: auto
+              network: ws
+              ws-opts:
+                path: /your-path
+                headers:
+                  Host: your-sni-domain.com
+              tls: true
+              servername: your-sni-domain.com
+          END
+              index=$((index + 1))
+          done
+          echo "✅ 已生成 proxies.yaml（共 $(($index-1)) 条节点）"
 
-            git commit -m "Update CF IPv6 Ping Top 25"
-
-            git push
-
-          fi
+      - name: 📤 提交结果到仓库
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "🤖 更新优选节点 [skip ci]"
+          file_pattern: "proxies.yaml result.csv ip.txt"
+          commit_user_name: "github-actions[bot]"
+          commit_user_email: "github-actions[bot]@users.noreply.github.com"
