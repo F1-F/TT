@@ -1,0 +1,7 @@
+#25 bestips updated at 2026-08-12 02:29 UTC
+# Source: 2606:4700:5a::/48
+# Source: 2606:4700:57::/48
+# Port: 443
+# Sorted by IPv6 ICMP Ping latency
+
+# No IPv6 Ping results available
