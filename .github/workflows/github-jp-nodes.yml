@@ -1,0 +1,353 @@
+name: GitHub Japan Nodes Collector
+
+on:
+  schedule:
+    # 每 3 小时运行一次
+    # 使用 17 分钟避开整点高峰
+    - cron: '17 */3 * * *'
+
+  # GitHub Actions 页面手动运行
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  collect-japan-nodes:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ==========================================
+      # 1. Checkout
+      # ==========================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ==========================================
+      # 2. 搜索 GitHub 最近 12 小时节点
+      # ==========================================
+      - name: Search recent GitHub nodes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUTPUT="github-jp-nodes.txt"
+          RAW_DATA="github-node-source.tmp"
+          REPOS="github-repositories.tmp"
+
+          # 清理旧临时文件
+          rm -f "$RAW_DATA"
+          rm -f "$REPOS"
+
+          touch "$RAW_DATA"
+          touch "$REPOS"
+
+          # ------------------------------------------
+          # 当前 UTC 时间
+          # ------------------------------------------
+          NOW=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+          # 12 小时前
+          SINCE=$(date -u -d '12 hours ago' '+%Y-%m-%dT%H:%M:%SZ')
+
+          echo "=========================================="
+          echo "GitHub Japan Node Collector"
+          echo "=========================================="
+          echo "Current UTC : $NOW"
+          echo "Search since: $SINCE"
+          echo ""
+
+          # ==========================================
+          # 搜索关键词
+          # ==========================================
+          QUERIES=(
+            '"#JP"'
+            '"#Japan"'
+            '"🇯🇵"'
+            '"JP 🇯🇵"'
+            '"Japan"'
+            '"日本"'
+            '"CF"'
+            '"Cloudflare"'
+            '"443#JP"'
+            '"2053#JP"'
+            '"8443#JP"'
+            '"2083#JP"'
+            '"2087#JP"'
+            '"2096#JP"'
+          )
+
+          # ==========================================
+          # GitHub Search
+          # ==========================================
+          for QUERY in "${QUERIES[@]}"; do
+
+            echo ""
+            echo "------------------------------------------"
+            echo "Searching: $QUERY"
+            echo "------------------------------------------"
+
+            # URL encode
+            ENCODED_QUERY=$(python3 -c \
+              "import urllib.parse; print(urllib.parse.quote('''$QUERY'''))")
+
+            # ----------------------------------------
+            # 只搜索最近 12 小时更新的代码
+            # ----------------------------------------
+            SEARCH_QUERY="${ENCODED_QUERY}+pushed:%3E%3D${SINCE}"
+
+            for PAGE in 1 2 3; do
+
+              echo "Page: $PAGE"
+
+              RESPONSE=$(curl -fsSL \
+                --retry 3 \
+                --connect-timeout 15 \
+                --max-time 60 \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "https://api.github.com/search/code?q=${SEARCH_QUERY}&per_page=100&page=${PAGE}" \
+                || true)
+
+              if [ -z "$RESPONSE" ]; then
+                echo "Empty response"
+                break
+              fi
+
+              # ----------------------------------------
+              # 检查 API 是否返回错误
+              # ----------------------------------------
+              if echo "$RESPONSE" | jq -e '.message' >/dev/null 2>&1; then
+                echo "GitHub API message:"
+                echo "$RESPONSE" | jq -r '.message'
+                break
+              fi
+
+              # ----------------------------------------
+              # 保存：
+              # owner/repository|path|branch
+              # ----------------------------------------
+              echo "$RESPONSE" \
+                | jq -r '
+                    .items[]?
+                    | select(.repository.private == false)
+                    | [
+                        .repository.full_name,
+                        .path,
+                        (.repository.default_branch // "main")
+                      ]
+                    | @tsv
+                  ' \
+                >> "$REPOS"
+
+              COUNT=$(echo "$RESPONSE" | jq '.items | length')
+
+              echo "Results: $COUNT"
+
+              # 少于 100 表示没有下一页
+              if [ "$COUNT" -lt 100 ]; then
+                break
+              fi
+
+              # 避免请求过快
+              sleep 3
+
+            done
+
+            # 避免 Search API 请求过快
+            sleep 5
+
+          done
+
+          # ==========================================
+          # 3. 去重候选文件
+          # ==========================================
+          sort -u "$REPOS" > "${REPOS}.unique"
+
+          echo ""
+          echo "=========================================="
+          echo "Unique candidate files"
+          echo "=========================================="
+
+          wc -l "${REPOS}.unique"
+
+          # ==========================================
+          # 4. 下载候选文件
+          # ==========================================
+          while IFS=$'\t' read -r REPO PATH BRANCH; do
+
+            [ -z "$REPO" ] && continue
+            [ -z "$PATH" ] && continue
+
+            echo "Downloading:"
+            echo "  Repository: $REPO"
+            echo "  File      : $PATH"
+
+            # GitHub raw URL
+            ENCODED_PATH=$(python3 -c \
+              "import urllib.parse; print(urllib.parse.quote('''$PATH'''))")
+
+            RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/${ENCODED_PATH}"
+
+            curl -fsSL \
+              --retry 2 \
+              --connect-timeout 10 \
+              --max-time 30 \
+              "$RAW_URL" \
+              >> "$RAW_DATA" \
+              || true
+
+            echo "" >> "$RAW_DATA"
+
+            # 防止请求过快
+            sleep 0.5
+
+          done < "${REPOS}.unique"
+
+          # ==========================================
+          # 5. 提取 IP:PORT + 日本标识
+          # ==========================================
+          echo ""
+          echo "=========================================="
+          echo "Extracting Japan nodes..."
+          echo "=========================================="
+
+          CANDIDATES="github-jp-candidates.tmp"
+
+          rm -f "$CANDIDATES"
+          touch "$CANDIDATES"
+
+          if [ -s "$RAW_DATA" ]; then
+
+            # ----------------------------------------
+            # 提取包含日本标识的 IPv4 节点
+            # ----------------------------------------
+            grep -Ei \
+              '([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]{1,5}.*(#JP|#Japan|🇯🇵|日本)' \
+              "$RAW_DATA" \
+              | grep -oE \
+              '([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]{1,5}' \
+              > "$CANDIDATES" \
+              || true
+
+          fi
+
+          # ==========================================
+          # 6. 验证 IP 和端口
+          # ==========================================
+          VALID="github-jp-valid.tmp"
+
+          rm -f "$VALID"
+          touch "$VALID"
+
+          while IFS= read -r NODE; do
+
+            [ -z "$NODE" ] && continue
+
+            IP="${NODE%:*}"
+            PORT="${NODE##*:}"
+
+            # IP 必须是 IPv4
+            if ! [[ "$IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              continue
+            fi
+
+            # 端口必须是数字
+            if ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
+              continue
+            fi
+
+            # 检查 IP 四段
+            VALID_IP=true
+
+            IFS='.' read -r A B C D <<< "$IP"
+
+            for OCTET in "$A" "$B" "$C" "$D"; do
+              if [ "$OCTET" -lt 0 ] || [ "$OCTET" -gt 255 ]; then
+                VALID_IP=false
+                break
+              fi
+            done
+
+            if [ "$VALID_IP" = false ]; then
+              continue
+            fi
+
+            # 端口范围
+            if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+              continue
+            fi
+
+            echo "${IP}:${PORT}#JP" >> "$VALID"
+
+          done < "$CANDIDATES"
+
+          # ==========================================
+          # 7. 去重 + 排序
+          # ==========================================
+          sort -u "$VALID" > github-jp-nodes.new
+
+          COUNT=$(wc -l < github-jp-nodes.new)
+
+          echo ""
+          echo "=========================================="
+          echo "Japan nodes found: $COUNT"
+          echo "=========================================="
+
+          cat github-jp-nodes.new || true
+
+          # ==========================================
+          # 8. 防止搜索失败导致旧文件被清空
+          #
+          # 如果本轮没有找到节点：
+          # 保留上一轮 github-jp-nodes.txt
+          # ==========================================
+          if [ "$COUNT" -eq 0 ]; then
+
+            echo ""
+            echo "No Japan nodes found."
+            echo "Keeping previous output file."
+
+            rm -f github-jp-nodes.new
+
+          else
+
+            mv github-jp-nodes.new "$OUTPUT"
+
+          fi
+
+          # ==========================================
+          # 9. 清理临时文件
+          # ==========================================
+          rm -f \
+            "$RAW_DATA" \
+            "$REPOS" \
+            "${REPOS}.unique" \
+            "$CANDIDATES" \
+            "$VALID"
+
+      # ==========================================
+      # 10. 提交 TXT
+      # ==========================================
+      - name: Commit updated TXT
+        shell: bash
+        run: |
+          set -e
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add github-jp-nodes.txt
+
+          if git diff --cached --quiet; then
+            echo "No changes detected."
+            exit 0
+          fi
+
+          git commit -m "Update GitHub Japan nodes"
+
+          git push
