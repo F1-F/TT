@@ -2,19 +2,19 @@ name: GitHub Japan CF Nodes Top 25
 
 on:
   # 每 3 小时运行一次
-  # GitHub 默认使用 UTC
+  # GitHub Actions 使用 UTC
   schedule:
     - cron: '17 */3 * * *'
 
-  # 支持手动运行
+  # 支持 Actions 页面手动运行
   workflow_dispatch:
 
-# 防止多个 Workflow 同时运行造成 git 冲突
+# 防止多个任务同时修改仓库
 concurrency:
   group: github-jp-nodes
   cancel-in-progress: true
 
-# 允许 GITHUB_TOKEN 写入当前仓库
+# 允许 Workflow 写入当前仓库
 permissions:
   contents: write
 
@@ -44,6 +44,7 @@ jobs:
             github-node-source.tmp \
             github-repositories.tmp \
             github-repositories.unique \
+            jp-japan-lines.tmp \
             jp-candidates.tmp \
             jp-nodes.txt \
             jp-speed-results.txt \
@@ -56,32 +57,17 @@ jobs:
           echo "=========================================="
           echo "GitHub Japan CF Node Collector"
           echo "=========================================="
-          echo "UTC time:"
+
+          echo ""
+          echo "UTC:"
           date -u
 
           echo ""
           echo "Search window:"
           date -u -d '12 hours ago'
-          echo "to"
-          date -u
 
       # ==========================================================
       # 3. 搜索 GitHub
-      # ==========================================================
-      #
-      # 注意：
-      # GitHub Code Search 并不能可靠地用 pushed: qualifier
-      # 完成“最近 12 小时文件”的精确搜索。
-      #
-      # 因此这里采用：
-      #
-      # Code Search
-      #      ↓
-      # 获取候选仓库
-      #      ↓
-      # 检查仓库最近更新时间
-      #
-      # 避免把不存在/不稳定的 pushed: 查询直接作为唯一依据。
       # ==========================================================
       - name: Search GitHub candidate files
         env:
@@ -90,6 +76,40 @@ jobs:
         run: |
           set -euo pipefail
 
+          # --------------------------------------------------------
+          # Bash 原生 URL 编码
+          #
+          # 不依赖 Python
+          # --------------------------------------------------------
+          urlencode() {
+            local string="${1}"
+            local strlen=${#string}
+            local encoded=""
+            local pos c o
+
+            for ((pos=0; pos<strlen; pos++)); do
+
+              c="${string:$pos:1}"
+
+              case "$c" in
+                [-_.~a-zA-Z0-9])
+                  o="$c"
+                  ;;
+                *)
+                  printf -v o '%%%02X' "'$c"
+                  ;;
+              esac
+
+              encoded+="${o}"
+
+            done
+
+            printf '%s' "$encoded"
+          }
+
+          # --------------------------------------------------------
+          # 搜索关键词
+          # --------------------------------------------------------
           QUERIES=(
             '"#JP"'
             '"#Japan"'
@@ -114,8 +134,7 @@ jobs:
             echo "Searching: $QUERY"
             echo "=========================================="
 
-            ENCODED_QUERY=$(python3 -c \
-              "import urllib.parse; print(urllib.parse.quote('''$QUERY'''))")
+            ENCODED_QUERY=$(urlencode "$QUERY")
 
             for PAGE in 1 2; do
 
@@ -130,15 +149,20 @@ jobs:
                 || true)
 
               if [ -z "$RESPONSE" ]; then
-                echo "Empty response."
+                echo "Empty API response."
                 break
               fi
 
+              # ----------------------------------------------------
               # API 错误
+              # ----------------------------------------------------
               if echo "$RESPONSE" | jq -e '.message' >/dev/null 2>&1; then
+
                 echo "GitHub API:"
                 echo "$RESPONSE" | jq -r '.message'
+
                 break
+
               fi
 
               COUNT=$(echo "$RESPONSE" | jq '.items | length')
@@ -146,11 +170,7 @@ jobs:
               echo "Page $PAGE: $COUNT results"
 
               # ----------------------------------------------------
-              # 保存：
-              #
-              # repository
-              # path
-              # branch
+              # 保存仓库 / 文件 / branch
               # ----------------------------------------------------
               echo "$RESPONSE" |
                 jq -r '
@@ -172,7 +192,7 @@ jobs:
 
             done
 
-            # 防止 Code Search 请求过快
+            # 避免 API 请求过快
             sleep 4
 
           done
@@ -199,16 +219,48 @@ jobs:
         run: |
           set -euo pipefail
 
+          # --------------------------------------------------------
+          # Bash 原生 URL 编码
+          # --------------------------------------------------------
+          urlencode() {
+            local string="${1}"
+            local strlen=${#string}
+            local encoded=""
+            local pos c o
+
+            for ((pos=0; pos<strlen; pos++)); do
+
+              c="${string:$pos:1}"
+
+              case "$c" in
+                [-_.~a-zA-Z0-9])
+                  o="$c"
+                  ;;
+                *)
+                  printf -v o '%%%02X' "'$c"
+                  ;;
+              esac
+
+              encoded+="${o}"
+
+            done
+
+            printf '%s' "$encoded"
+          }
+
+          # --------------------------------------------------------
+          # 下载所有候选文件
+          # --------------------------------------------------------
           while IFS=$'\t' read -r REPO PATH BRANCH; do
 
             [ -z "$REPO" ] && continue
             [ -z "$PATH" ] && continue
 
-            ENCODED_PATH=$(python3 -c \
-              "import urllib.parse; print(urllib.parse.quote('''$PATH'''))")
+            ENCODED_PATH=$(urlencode "$PATH")
 
             RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/${ENCODED_PATH}"
 
+            echo ""
             echo "Downloading:"
             echo "  Repository: $REPO"
             echo "  File:       $PATH"
@@ -228,28 +280,31 @@ jobs:
           done < github-repositories.unique
 
           echo ""
-          echo "Downloaded source size:"
+          echo "Downloaded source:"
           wc -c github-node-source.tmp
 
       # ==========================================================
-      # 5. 提取 JP IPv4
+      # 5. 提取日本 IPv4
       # ==========================================================
       - name: Extract Japan IPv4 nodes
         shell: bash
         run: |
           set -euo pipefail
 
+          : > jp-japan-lines.tmp
           : > jp-candidates.tmp
+          : > jp-nodes.txt
 
           if [ ! -s github-node-source.tmp ]; then
+
             echo "No downloaded source data."
+
             exit 0
+
           fi
 
           # --------------------------------------------------------
-          # 只处理明确带有日本标识的行
-          #
-          # 支持：
+          # 查找明确的日本标识
           #
           # #JP
           # #Japan
@@ -262,6 +317,9 @@ jobs:
             > jp-japan-lines.tmp \
             || true
 
+          # --------------------------------------------------------
+          # 提取 IPv4:PORT
+          # --------------------------------------------------------
           if [ -s jp-japan-lines.tmp ]; then
 
             grep -oE \
@@ -273,10 +331,8 @@ jobs:
           fi
 
           # --------------------------------------------------------
-          # 验证 IP / Port
+          # 验证
           # --------------------------------------------------------
-          : > jp-nodes.txt
-
           while IFS= read -r NODE; do
 
             [ -z "$NODE" ] && continue
@@ -284,11 +340,11 @@ jobs:
             IP="${NODE%:*}"
             PORT="${NODE##*:}"
 
-            # IP 格式
+            # IPv4
             [[ "$IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
               || continue
 
-            # Port 格式
+            # Port
             [[ "$PORT" =~ ^[0-9]+$ ]] \
               || continue
 
@@ -299,23 +355,24 @@ jobs:
                [ "$B" -gt 255 ] ||
                [ "$C" -gt 255 ] ||
                [ "$D" -gt 255 ]; then
+
               continue
+
             fi
 
             # Port 范围
             if [ "$PORT" -lt 1 ] ||
                [ "$PORT" -gt 65535 ]; then
+
               continue
+
             fi
 
-            echo "${IP}:${PORT}#JP" >> jp-nodes.txt
+            echo "${IP}:${PORT}#JP"
 
-          done < jp-candidates.tmp
-
-          # --------------------------------------------------------
-          # 去重
-          # --------------------------------------------------------
-          sort -u jp-nodes.txt -o jp-nodes.txt
+          done < jp-candidates.tmp |
+          sort -u \
+            > jp-nodes.txt
 
           echo ""
           echo "=========================================="
@@ -338,8 +395,10 @@ jobs:
           : > "$RESULTS"
 
           if [ ! -s "$INPUT" ]; then
-            echo "No Japan nodes to test."
+
+            echo "No Japan nodes found."
             exit 0
+
           fi
 
           TOTAL=$(wc -l < "$INPUT")
@@ -365,7 +424,7 @@ jobs:
             echo "[$COUNT/$TOTAL] ${HOST}:${PORT}"
 
             # ------------------------------------------------------
-            # TCP 测试
+            # TCP
             # ------------------------------------------------------
 
             TCP_START=$(date +%s%3N)
@@ -375,6 +434,7 @@ jobs:
               >/dev/null 2>&1; then
 
               TCP_END=$(date +%s%3N)
+
               TCP_MS=$((TCP_END - TCP_START))
 
               echo "TCP: ${TCP_MS} ms"
@@ -382,15 +442,13 @@ jobs:
             else
 
               echo "TCP: FAILED"
+
               continue
 
             fi
 
             # ------------------------------------------------------
-            # HTTPS / TLS 测试
-            #
-            # 使用 Cloudflare HTTPS endpoint
-            # 强制把 www.cloudflare.com 指向当前 IP
+            # HTTPS / TLS
             # ------------------------------------------------------
 
             CURL_OUTPUT=$(
@@ -409,6 +467,7 @@ jobs:
             if [ -z "$CURL_OUTPUT" ]; then
 
               echo "HTTPS: FAILED"
+
               continue
 
             fi
@@ -419,7 +478,7 @@ jobs:
             TIME_TOTAL=$(echo "$CURL_OUTPUT" | awk '{print $4}')
 
             # ------------------------------------------------------
-            # 只接受 HTTP 2xx / 3xx
+            # 2xx / 3xx
             # ------------------------------------------------------
 
             if [[ "$HTTP_CODE" =~ ^[23][0-9][0-9]$ ]]; then
@@ -441,15 +500,6 @@ jobs:
               echo "TTFB:    ${TTFB_MS} ms"
               echo "Total:   ${TOTAL_MS} ms"
 
-              # ----------------------------------------------------
-              # 保存：
-              #
-              # HTTPS总耗时
-              # TCP耗时
-              # TTFB
-              # IP:PORT#JP
-              # ----------------------------------------------------
-
               printf '%s %s %s %s\n' \
                 "$TOTAL_MS" \
                 "$TCP_MS" \
@@ -460,7 +510,6 @@ jobs:
             else
 
               echo "HTTPS HTTP CODE: $HTTP_CODE"
-              continue
 
             fi
 
@@ -468,13 +517,13 @@ jobs:
 
           echo ""
           echo "=========================================="
-          echo "Working nodes"
+          echo "Working Japan nodes"
           echo "=========================================="
 
           wc -l "$RESULTS"
 
       # ==========================================================
-      # 7. 选择 Top 25
+      # 7. Top 25
       # ==========================================================
       - name: Select Top 25 Japan nodes
         shell: bash
@@ -484,17 +533,14 @@ jobs:
           OUTPUT="github-jp-nodes.txt"
 
           # --------------------------------------------------------
-          # 本轮没有任何可用节点
+          # 本轮没有任何有效节点
           #
-          # 不创建新文件
-          # 不覆盖旧文件
-          # 不产生 Git 提交
+          # 保留旧文件
           # --------------------------------------------------------
           if [ ! -s jp-speed-results.txt ]; then
 
-            echo "=========================================="
-            echo "No working Japan nodes"
-            echo "=========================================="
+            echo "No working Japan nodes."
+            echo "Keeping previous TXT."
 
             echo "false" > .jp-update
 
@@ -503,13 +549,11 @@ jobs:
           fi
 
           # --------------------------------------------------------
-          # 按：
+          # 排序：
           #
-          # 1. HTTPS 总耗时
-          # 2. TCP
-          # 3. TTFB
-          #
-          # 排序
+          # 1 HTTPS 总耗时
+          # 2 TCP
+          # 3 TTFB
           # --------------------------------------------------------
 
           sort -n \
@@ -522,12 +566,12 @@ jobs:
             > github-jp-nodes.new
 
           # --------------------------------------------------------
-          # 再次确认输出不为空
+          # 防止空文件
           # --------------------------------------------------------
 
           if [ ! -s github-jp-nodes.new ]; then
 
-            echo "Generated Top 25 file is empty."
+            echo "Generated file is empty."
 
             rm -f github-jp-nodes.new
 
@@ -553,11 +597,11 @@ jobs:
           cat "$OUTPUT"
 
           echo ""
-          echo "Total selected:"
+          echo "Total:"
           wc -l < "$OUTPUT"
 
       # ==========================================================
-      # 8. 提交 TXT
+      # 8. Git Commit
       # ==========================================================
       - name: Commit updated TXT
         shell: bash
@@ -565,14 +609,12 @@ jobs:
           set -euo pipefail
 
           # --------------------------------------------------------
-          # 本轮没有新结果
+          # 没有更新
           # --------------------------------------------------------
 
           if [ ! -f .jp-update ]; then
 
-            echo "No update status file."
-            echo "Skipping commit."
-
+            echo "No update status."
             exit 0
 
           fi
@@ -580,47 +622,49 @@ jobs:
           if [ "$(cat .jp-update)" != "true" ]; then
 
             echo "No new result."
-            echo "Keeping previous github-jp-nodes.txt."
+            echo "Keeping previous TXT."
 
             exit 0
 
           fi
 
           # --------------------------------------------------------
-          # 最终文件存在性检查
+          # 文件必须存在
           # --------------------------------------------------------
 
           if [ ! -f github-jp-nodes.txt ]; then
 
-            echo "ERROR: github-jp-nodes.txt does not exist."
-
-            exit 0
-
-          fi
-
-          if [ ! -s github-jp-nodes.txt ]; then
-
-            echo "ERROR: github-jp-nodes.txt is empty."
+            echo "github-jp-nodes.txt does not exist."
+            echo "Skipping commit."
 
             exit 0
 
           fi
 
           # --------------------------------------------------------
-          # Git 配置
+          # 文件不能是空的
+          # --------------------------------------------------------
+
+          if [ ! -s github-jp-nodes.txt ]; then
+
+            echo "github-jp-nodes.txt is empty."
+            echo "Skipping commit."
+
+            exit 0
+
+          fi
+
+          # --------------------------------------------------------
+          # Git
           # --------------------------------------------------------
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # --------------------------------------------------------
-          # 添加文件
-          # --------------------------------------------------------
-
           git add -- github-jp-nodes.txt
 
           # --------------------------------------------------------
-          # 没有变化则不提交
+          # 没变化
           # --------------------------------------------------------
 
           if git diff --cached --quiet; then
@@ -632,22 +676,22 @@ jobs:
           fi
 
           # --------------------------------------------------------
-          # 提交
+          # Commit
           # --------------------------------------------------------
 
           git commit \
             -m "Update Japan CF top 25 nodes"
 
           # --------------------------------------------------------
-          # 推送
+          # Push
           # --------------------------------------------------------
 
           git push
 
       # ==========================================================
-      # 9. 显示最终测速报告
+      # 9. 输出报告
       # ==========================================================
-      - name: Show final speed report
+      - name: Show final report
         if: always()
         shell: bash
         run: |
@@ -686,6 +730,6 @@ jobs:
 
           else
 
-            echo "No new TXT generated in this run."
+            echo "No new TXT generated."
 
           fi
