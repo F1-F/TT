@@ -1,0 +1,124 @@
+name: Cloudflare 优选 IP 测速
+
+on:
+  schedule:
+    # 每 3 小时运行一次（UTC 时间）
+    - cron: '0 */3 * * *'
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  speedtest:
+    runs-on: ubuntu-latest
+    name: 测速并生成优选列表
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装依赖工具
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fping dnsutils curl
+
+      - name: 下载 IP 和域名原始列表
+        run: |
+          curl -sL https://raw.githubusercontent.com/LancelotRar/best-cf-ips/main/best-cf-ipv4.txt -o ipv4_raw.txt
+          curl -sL https://raw.githubusercontent.com/LancelotRar/best-cf-ips/main/best-cf-domain.txt -o domain_raw.txt
+          echo "下载完成，IP 行数: $(wc -l < ipv4_raw.txt)，域名行数: $(wc -l < domain_raw.txt)"
+
+      - name: 解析域名为 IP 并合并去重
+        run: |
+          # 解析每个域名，取第一个 A 记录
+          > resolved_ips.txt
+          while IFS= read -r domain; do
+            [ -z "$domain" ] && continue
+            ip=$(dig +short A "$domain" 2>/dev/null | head -n1)
+            if [ -n "$ip" ]; then
+              echo "$ip" >> resolved_ips.txt
+            fi
+          done < domain_raw.txt
+
+          # 合并 IP 列表并去重，仅保留合法 IPv4
+          cat ipv4_raw.txt resolved_ips.txt | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -u > all_ips.txt
+          echo "合并去重后共 $(wc -l < all_ips.txt) 个 IP"
+
+      - name: 第一轮：批量 Ping 测速（筛选 <200ms）
+        run: |
+          # fping 批量测试，每个IP发3个包，超时1秒，取平均延迟
+          fping -c 3 -q -t 1000 -f all_ips.txt 2>&1 | \
+          awk -F'[ /]' '/avg/ {
+            ip = $1
+            avg = $8
+            if (avg+0 < 200) printf "%.2f %s\n", avg, ip
+          }' | sort -n > ping_ok.txt
+
+          echo "Ping < 200ms 的节点数：$(wc -l < ping_ok.txt)"
+          echo "=== Ping 合格列表（延迟ms + IP）==="
+          cat ping_ok.txt
+
+      - name: 第二轮：下载速度测试（筛选 >5MB/s，取前20）
+        run: |
+          > speed_results.txt
+
+          # 定义单IP测速函数：下载Cloudflare官方10MB测速文件
+          test_node() {
+            local ip="$1"
+            local ping_ms="$2"
+            
+            # 下载测速，超时10秒，获取平均下载速度（字节/秒）
+            local speed_bps=$(curl -o /dev/null -s -w "%{speed_download}" \
+              --resolve speed.cloudflare.com:443:"$ip" \
+              --max-time 10 \
+              "https://speed.cloudflare.com/__down?bytes=10485760" 2>/dev/null)
+            
+            # 转换为 MB/s，保留2位小数
+            local speed_mb=$(awk -v bps="$speed_bps" 'BEGIN{printf "%.2f", bps / 1048576}')
+            
+            # 验证数值有效且速度大于5MB/s
+            if echo "$speed_mb" | grep -qE '^[0-9]+\.[0-9]+$' && \
+               awk -v s="$speed_mb" 'BEGIN{exit !(s > 5)}'; then
+              echo "$speed_mb $ping_ms $ip" >> speed_results.txt
+              echo "✅ $ip | 延迟: ${ping_ms}ms | 速度: ${speed_mb} MB/s"
+            else
+              echo "❌ $ip | 速度不达标或测试失败"
+            fi
+          }
+          export -f test_node
+
+          # 并行4个同时测试，提升效率
+          awk '{print $2, $1}' ping_ok.txt | xargs -P 4 -n 2 bash -c 'test_node "$0" "$1"'
+
+          # 按下载速度降序排序，取前20名
+          sort -k1 -n -r speed_results.txt | head -20 > top20_full.txt
+
+          echo ""
+          echo "=== 最终前20名（速度MB/s 延迟ms IP）==="
+          cat top20_full.txt
+
+          # 提取纯IP列表为最终输出文件
+          awk '{print $3}' top20_full.txt > best-cf-top20.txt
+          echo ""
+          echo "已生成 best-cf-top20.txt（纯IP列表）"
+          cat best-cf-top20.txt
+
+      - name: 上传结果为 Action 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: best-cf-top20
+          path: best-cf-top20.txt
+          retention-days: 7
+
+      - name: 自动提交结果回仓库
+        run: |
+          git config --local user.email "actions@github.com"
+          git config --local user.name "GitHub Actions Bot"
+          git add best-cf-top20.txt
+          
+          # 仅当文件有变更时才提交，避免空提交
+          if git diff --cached --quiet; then
+            echo "本次测速结果与上次一致，无变更，跳过提交"
+          else
+            git commit -m "自动更新优选IP Top20 列表 [skip ci]"
+            git push
+            echo "结果已提交并推送到仓库"
+          fi
