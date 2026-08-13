@@ -1,5 +1,0 @@
-# Cloudflare IPv6 Ping Results
-# Port: 443
-# Updated: 2026-08-12 02:29 UTC
-
-No IPv6 Ping results.
