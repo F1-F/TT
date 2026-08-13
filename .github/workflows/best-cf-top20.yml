@@ -56,7 +56,7 @@ jobs:
           echo "=== Ping 合格列表（延迟ms + IP）==="
           cat ping_ok.txt
 
-      - name: 第二轮：下载速度测试（筛选 >5MB/s，取前20）
+      - name: 第二轮：下载速度测试（筛选 >1MB/s，取前20）
         run: |
           > speed_results.txt
 
@@ -74,9 +74,9 @@ jobs:
             # 转换为 MB/s，保留2位小数
             local speed_mb=$(awk -v bps="$speed_bps" 'BEGIN{printf "%.2f", bps / 1048576}')
             
-            # 验证数值有效且速度大于5MB/s
+            # 验证数值有效且速度大于1MB/s
             if echo "$speed_mb" | grep -qE '^[0-9]+\.[0-9]+$' && \
-               awk -v s="$speed_mb" 'BEGIN{exit !(s > 5)}'; then
+               awk -v s="$speed_mb" 'BEGIN{exit !(s > 1)}'; then
               echo "$speed_mb $ping_ms $ip" >> speed_results.txt
               echo "✅ $ip | 延迟: ${ping_ms}ms | 速度: ${speed_mb} MB/s"
             else
