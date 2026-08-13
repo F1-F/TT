@@ -1,0 +1,81 @@
+name: Best CF IPs Filter
+
+# 每 3 小时运行一次，同时支持手动触发
+on:
+  schedule:
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  filter:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install fping
+        run: sudo apt-get update && sudo apt-get install -y fping
+
+      - name: Download IP and domain lists
+        run: |
+          curl -fsSL -o raw-ipv4.txt \
+            https://raw.githubusercontent.com/LancelotRar/best-cf-ips/main/best-cf-ipv4.txt
+          curl -fsSL -o raw-domain.txt \
+            https://raw.githubusercontent.com/LancelotRar/best-cf-ips/main/best-cf-domain.txt
+          echo "IPv4 lines: $(wc -l < raw-ipv4.txt)"
+          echo "Domain lines: $(wc -l < raw-domain.txt)"
+
+      - name: Merge and deduplicate targets
+        run: |
+          cat raw-ipv4.txt raw-domain.txt \
+            | sed 's/#.*//' \
+            | tr -d '\r' \
+            | awk 'NF{print $1}' \
+            | sort -u > targets.txt
+          echo "Total unique targets: $(wc -l < targets.txt)"
+
+      - name: Ping test and filter top 20 (< 100ms)
+        run: |
+          # 每个目标 ping 3 次，超时 500ms，取平均延迟
+          fping -c 3 -t 500 -p 100 -f targets.txt 2>&1 \
+            | awk -F'= ' '/min\/avg\/max/ {
+                split($2, a, "/");
+                avg = a[2] + 0;
+                # 主机名在第一个 ":" 之前
+                host = $1;
+                sub(/ *$/, "", host);
+                if (avg < 100) printf "%.2f %s\n", avg, host;
+              }' \
+            | sort -n \
+            | head -n 20 \
+            | awk '{print $2}' > best-cf-top20.txt
+
+          echo "===== Top 20 nodes (avg ping < 100ms) ====="
+          cat best-cf-top20.txt
+          echo "==========================================="
+          echo "Selected: $(wc -l < best-cf-top20.txt) nodes"
+
+      - name: Upload result as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: best-cf-top20
+          path: best-cf-top20.txt
+          retention-days: 7
+
+      - name: Commit result to repository
+        run: |
+          if [ -s best-cf-top20.txt ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add best-cf-top20.txt
+            if ! git diff --cached --quiet; then
+              git commit -m "chore: update best-cf-top20.txt ($(date -u +%Y-%m-%dT%H:%MZ))"
+              git push
+            else
+              echo "No changes to commit."
+            fi
+          fi
