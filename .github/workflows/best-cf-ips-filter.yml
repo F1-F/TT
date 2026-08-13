@@ -38,23 +38,23 @@ jobs:
             | sort -u > targets.txt
           echo "Total unique targets: $(wc -l < targets.txt)"
 
-      - name: Ping test and filter top 20 (< 100ms)
+      - name: Ping test and filter top 20 (< 500ms)
         run: |
-          # 每个目标 ping 3 次，超时 500ms，取平均延迟
-          fping -c 3 -t 500 -p 100 -f targets.txt 2>&1 \
+          # 每个目标 ping 3 次，超时 1000ms，取平均延迟
+          fping -c 3 -t 1000 -p 100 -f targets.txt 2>&1 \
             | awk -F'= ' '/min\/avg\/max/ {
                 split($2, a, "/");
                 avg = a[2] + 0;
                 # 主机名在第一个 ":" 之前
                 host = $1;
                 sub(/ *$/, "", host);
-                if (avg < 100) printf "%.2f %s\n", avg, host;
+                if (avg < 500) printf "%.2f %s\n", avg, host;
               }' \
             | sort -n \
             | head -n 20 \
             | awk '{print $2}' > best-cf-top20.txt
 
-          echo "===== Top 20 nodes (avg ping < 100ms) ====="
+          echo "===== Top 20 nodes (avg ping < 500ms) ====="
           cat best-cf-top20.txt
           echo "==========================================="
           echo "Selected: $(wc -l < best-cf-top20.txt) nodes"
