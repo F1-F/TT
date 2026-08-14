@@ -1,62 +1,60 @@
-name: 优选 IP 定时扫描（TCP 443 端口）
+name: 优选 IPv4（443端口，带端口输出）
 
 on:
   schedule:
-    # 每 3 小时执行一次
-    - cron: '0 */3 * * *'
-  workflow_dispatch:   # 支持手动触发
+    - cron: '0 */3 * * *'       # 每3小时执行
+  workflow_dispatch:            # 支持手动触发
 
 jobs:
-  scan-and-select:
+  scan:
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # 允许推送结果
+      contents: write
 
     steps:
-      - name: 检出仓库
+      - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 执行 TCP 443 端口优选（输出前20）
+      - name: TCP 443 端口延迟测试（取前20，输出带 :443）
         run: |
-          # 生成 IP 列表（排除 .0 和 .255）
+          # 生成 IP 列表
           for i in {1..254}; do
             echo "172.64.229.$i"
           done > ip_list.txt
 
-          # 定义测试函数：使用 curl 测量 TCP 连接时间（单位秒）
-          # --connect-timeout 2 超时2秒，-k 忽略证书，-s 静默
-          # 输出 "IP 连接时间(秒)"，失败则无输出
+          # 精准测试函数（测量 TCP 连接时间，单位秒）
           test_ip() {
             ip=$1
-            time=$(curl -o /dev/null -s -w "%{time_connect}" --connect-timeout 2 -k "https://${ip}:443" 2>/dev/null)
-            if [ -n "$time" ] && [ "$time" != "0.000" ]; then
+            time=$(curl -o /dev/null -s -w "%{time_connect}" --connect-timeout 3 -k "https://${ip}:443" 2>/dev/null)
+            if [ -n "$time" ] && [ "$time" != "0.000" ] && [ "$time" != "0" ]; then
               echo "$ip $time"
             fi
           }
           export -f test_ip
 
-          # 并发测试（50 个进程同时进行），收集所有成功结果
+          # 并发 50 进程扫描
           cat ip_list.txt | xargs -P 50 -I {} bash -c 'test_ip "$@"' _ {} > raw_result.txt
 
-          # 检查是否有结果
+          # 若无可用 IP，输出提示
           if [ ! -s raw_result.txt ]; then
             echo "未找到任何可用的 443 端口 IP" > best_ips.txt
             echo "未找到任何可用的 443 端口 IP" > best_ips_iponly.txt
-            exit 1
+            exit 0
           fi
 
-          # 按延迟（第二列）排序，取前 20
-          sort -k2 -n raw_result.txt | head -20 > sorted_result.txt
+          # 排序取前 20
+          sort -k2 -n raw_result.txt | head -20 > sorted.txt
 
-          # 格式化输出：IP 和延迟（转换为毫秒）
-          awk '{printf "%-15s %.2f ms\n", $1, $2*1000}' sorted_result.txt > best_ips.txt
+          # 生成带延迟的结果（IP:443 + 延迟 ms）
+          awk '{printf "%-18s %.2f ms\n", $1 ":443", $2*1000}' sorted.txt > best_ips.txt
 
-          # 仅 IP 列表
-          awk '{print $1}' sorted_result.txt > best_ips_iponly.txt
+          # 生成仅 IP:443 列表（不带延迟）
+          awk '{print $1 ":443"}' sorted.txt > best_ips_iponly.txt
 
-          # 打印统计信息
-          echo "✅ 成功连接 443 端口的 IP 总数：$(wc -l < raw_result.txt)"
-          echo "延迟最低的前 20 个 IP："
+          # 打印统计
+          total=$(wc -l < raw_result.txt)
+          echo "✅ 可用的 IP 总数：$total"
+          echo "📋 前 20 个最优 IP："
           cat best_ips.txt
 
       - name: 提交并推送结果
@@ -64,5 +62,5 @@ jobs:
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git add best_ips.txt best_ips_iponly.txt
-          git diff --staged --quiet || git commit -m "自动更新最优 IP 列表（443端口，$(date +'%Y-%m-%d %H:%M:%S')）"
+          git diff --staged --quiet || git commit -m "自动更新优选IP（443端口，$(date +'%Y-%m-%d %H:%M:%S')）"
           git push
