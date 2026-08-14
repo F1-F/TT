@@ -1,4 +1,4 @@
-name: 优选 IPv4（443端口，标准格式输出）
+name: 优选 IPv4（443端口，带编号标签）
 
 on:
   schedule:
@@ -15,7 +15,7 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: TCP 443 端口延迟测试（取前20，标准格式）
+      - name: TCP 443 端口延迟测试（取前20，带 #JP-IPv4 标签）
         run: |
           # 生成 IP 列表（排除 .0 和 .255）
           for i in {1..254}; do
@@ -46,16 +46,16 @@ jobs:
           sort -k2 -n raw_result.txt | head -20 > sorted.txt
 
           # ---------- 生成标准格式输出 ----------
-          # best_ips.txt：每行 "IP:端口  延迟(ms)"
-          awk '{printf "%-18s %.2f ms\n", $1 ":443", $2*1000}' sorted.txt > best_ips.txt
+          # best_ips.txt：每行 "IP:端口  延迟(ms)  #JP-IPv4 编号"
+          awk '{printf "%-18s %.2f ms  #JP-IPv4 %02d\n", $1 ":443", $2*1000, NR}' sorted.txt > best_ips.txt
 
-          # best_ips_iponly.txt：每行一个 "IP:端口"（无延迟）
-          awk '{print $1 ":443"}' sorted.txt > best_ips_iponly.txt
+          # best_ips_iponly.txt：每行 "IP:端口#JP-IPv4 编号"（端口后直接接#，无空格）
+          awk '{printf "%s#JP-IPv4 %02d\n", $1 ":443", NR}' sorted.txt > best_ips_iponly.txt
 
           # 打印统计（方便查看）
           total=$(wc -l < raw_result.txt)
           echo "✅ 可用的 IP 总数：$total"
-          echo "📋 前 20 个最优 IP（每行一个）："
+          echo "📋 前 20 个最优 IP（带编号）："
           cat best_ips_iponly.txt
 
       - name: 提交并推送结果
@@ -63,5 +63,5 @@ jobs:
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git add best_ips.txt best_ips_iponly.txt
-          git diff --staged --quiet || git commit -m "自动更新优选IP（443端口，$(date +'%Y-%m-%d %H:%M:%S')）"
+          git diff --staged --quiet || git commit -m "自动更新优选IP（443端口，带编号标签 $(date +'%Y-%m-%d %H:%M:%S')）"
           git push
