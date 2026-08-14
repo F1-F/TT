@@ -1,4 +1,4 @@
-name: 优选 IPv4（443端口，带端口输出）
+name: 优选 IPv4（443端口，标准格式输出）
 
 on:
   schedule:
@@ -15,9 +15,9 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: TCP 443 端口延迟测试（取前20，输出带 :443）
+      - name: TCP 443 端口延迟测试（取前20，标准格式）
         run: |
-          # 生成 IP 列表
+          # 生成 IP 列表（排除 .0 和 .255）
           for i in {1..254}; do
             echo "172.64.229.$i"
           done > ip_list.txt
@@ -42,20 +42,21 @@ jobs:
             exit 0
           fi
 
-          # 排序取前 20
+          # 按延迟排序，取前 20
           sort -k2 -n raw_result.txt | head -20 > sorted.txt
 
-          # 生成带延迟的结果（IP:443 + 延迟 ms）
+          # ---------- 生成标准格式输出 ----------
+          # best_ips.txt：每行 "IP:端口  延迟(ms)"
           awk '{printf "%-18s %.2f ms\n", $1 ":443", $2*1000}' sorted.txt > best_ips.txt
 
-          # 生成仅 IP:443 列表（不带延迟）
+          # best_ips_iponly.txt：每行一个 "IP:端口"（无延迟）
           awk '{print $1 ":443"}' sorted.txt > best_ips_iponly.txt
 
-          # 打印统计
+          # 打印统计（方便查看）
           total=$(wc -l < raw_result.txt)
           echo "✅ 可用的 IP 总数：$total"
-          echo "📋 前 20 个最优 IP："
-          cat best_ips.txt
+          echo "📋 前 20 个最优 IP（每行一个）："
+          cat best_ips_iponly.txt
 
       - name: 提交并推送结果
         run: |
