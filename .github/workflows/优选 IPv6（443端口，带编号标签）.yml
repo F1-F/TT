@@ -1,0 +1,69 @@
+name: 优选 IPv6（443端口，带编号标签）
+
+on:
+  schedule:
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: TCP 443 端口延迟测试（取前20，带 #JP-IPv6 标签）
+        run: |
+          # 定义三个IPv6前缀
+          prefixes=(
+            "2606:4700:5a"
+            "2606:4700:52"
+            "2606:4700:57"
+          )
+
+          # 生成IP列表：每个前缀下取 ::1 ~ ::fe
+          > ip_list.txt
+          for prefix in "${prefixes[@]}"; do
+            for i in {1..254}; do
+              printf "%s::%x\n" "$prefix" "$i"   # 用十六进制表示最后一段，更规范
+            done
+          done >> ip_list.txt
+
+          test_ip() {
+            ip=$1
+            # 注意IPv6地址需用方括号
+            time=$(curl -o /dev/null -s -w "%{time_connect}" --connect-timeout 3 -k "https://[${ip}]:443" 2>/dev/null)
+            if [ -n "$time" ] && [ "$time" != "0.000" ] && [ "$time" != "0" ]; then
+              echo "$ip $time"
+            fi
+          }
+          export -f test_ip
+
+          cat ip_list.txt | xargs -P 50 -I {} bash -c 'test_ip "$@"' _ {} > raw_result.txt
+
+          if [ ! -s raw_result.txt ]; then
+            echo "未找到任何可用的 443 端口 IPv6 地址" > best_ips.txt
+            echo "未找到任何可用的 443 端口 IPv6 地址" > best_ips_iponly.txt
+            exit 0
+          fi
+
+          sort -k2 -n raw_result.txt | head -20 > sorted.txt
+
+          awk '{printf "%-40s %.2f ms  #JP-IPv6 %02d\n", $1 ":443", $2*1000, NR}' sorted.txt > best_ips.txt
+          awk '{printf "%s#JP-IPv6 %02d\n", $1 ":443", NR}' sorted.txt > best_ips_iponly.txt
+
+          total=$(wc -l < raw_result.txt)
+          echo "✅ 可用的 IPv6 总数：$total"
+          echo "📋 前 20 个最优 IPv6（带编号）："
+          cat best_ips_iponly.txt
+
+      - name: 提交并推送结果
+        run: |
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git add best_ips.txt best_ips_iponly.txt
+          git diff --staged --quiet || git commit -m "自动更新优选IPv6（443端口，带编号标签 $(date +'%Y-%m-%d %H:%M:%S')）"
+          git push
