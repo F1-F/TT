@@ -2,8 +2,8 @@ name: 优选 IPv4（443端口，带编号标签）
 
 on:
   schedule:
-    - cron: '0 */3 * * *'       # 每3小时执行
-  workflow_dispatch:            # 支持手动触发
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
 
 jobs:
   scan:
@@ -13,16 +13,14 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5    # ← v4 改为 v5
 
       - name: TCP 443 端口延迟测试（取前20，带 #JP-IPv4 标签）
         run: |
-          # 生成 IP 列表（排除 .0 和 .255）
           for i in {1..254}; do
             echo "172.64.229.$i"
           done > ip_list.txt
 
-          # 精准测试函数（测量 TCP 连接时间，单位秒）
           test_ip() {
             ip=$1
             time=$(curl -o /dev/null -s -w "%{time_connect}" --connect-timeout 3 -k "https://${ip}:443" 2>/dev/null)
@@ -32,27 +30,19 @@ jobs:
           }
           export -f test_ip
 
-          # 并发 50 进程扫描
           cat ip_list.txt | xargs -P 50 -I {} bash -c 'test_ip "$@"' _ {} > raw_result.txt
 
-          # 若无可用 IP，输出提示
           if [ ! -s raw_result.txt ]; then
             echo "未找到任何可用的 443 端口 IP" > best_ips.txt
             echo "未找到任何可用的 443 端口 IP" > best_ips_iponly.txt
             exit 0
           fi
 
-          # 按延迟排序，取前 20
           sort -k2 -n raw_result.txt | head -20 > sorted.txt
 
-          # ---------- 生成标准格式输出 ----------
-          # best_ips.txt：每行 "IP:端口  延迟(ms)  #JP-IPv4 编号"
           awk '{printf "%-18s %.2f ms  #JP-IPv4 %02d\n", $1 ":443", $2*1000, NR}' sorted.txt > best_ips.txt
-
-          # best_ips_iponly.txt：每行 "IP:端口#JP-IPv4 编号"（端口后直接接#，无空格）
           awk '{printf "%s#JP-IPv4 %02d\n", $1 ":443", NR}' sorted.txt > best_ips_iponly.txt
 
-          # 打印统计（方便查看）
           total=$(wc -l < raw_result.txt)
           echo "✅ 可用的 IP 总数：$total"
           echo "📋 前 20 个最优 IP（带编号）："
