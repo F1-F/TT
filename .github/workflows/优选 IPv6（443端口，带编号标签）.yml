@@ -45,25 +45,26 @@ jobs:
           cat ip_list.txt | xargs -P 50 -I {} bash -c 'test_ip "$@"' _ {} > raw_result.txt
 
           if [ ! -s raw_result.txt ]; then
-            echo "未找到任何可用的 443 端口 IPv6 地址" > best_ips.txt
-            echo "未找到任何可用的 443 端口 IPv6 地址" > best_ips_iponly.txt
+            echo "未找到任何可用的 443 端口 IPv6 地址" > best_ips_v6.txt
+            echo "未找到任何可用的 443 端口 IPv6 地址" > best_ips_iponly_v6.txt
             exit 0
           fi
 
           sort -k2 -n raw_result.txt | head -20 > sorted.txt
 
-          awk '{printf "%-40s %.2f ms  #JP-IPv6 %02d\n", $1 ":443", $2*1000, NR}' sorted.txt > best_ips.txt
-          awk '{printf "%s#JP-IPv6 %02d\n", $1 ":443", NR}' sorted.txt > best_ips_iponly.txt
+          # 输出格式：地址:端口（IPv6带方括号），延迟，标签和编号
+          awk '{printf "[%s]:443  %.2f ms  #JP-IPv6 %02d\n", $1, $2*1000, NR}' sorted.txt > best_ips_v6.txt
+          awk '{printf "[%s]:443#JP-IPv6 %02d\n", $1, NR}' sorted.txt > best_ips_iponly_v6.txt
 
           total=$(wc -l < raw_result.txt)
           echo "✅ 可用的 IPv6 总数：$total"
           echo "📋 前 20 个最优 IPv6（带编号）："
-          cat best_ips_iponly.txt
+          cat best_ips_iponly_v6.txt
 
       - name: 提交并推送结果
         run: |
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git add best_ips.txt best_ips_iponly.txt
+          git add best_ips_v6.txt best_ips_iponly_v6.txt
           git diff --staged --quiet || git commit -m "自动更新优选IPv6（443端口，带编号标签 $(date +'%Y-%m-%d %H:%M:%S')）"
           git push
