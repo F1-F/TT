@@ -13,46 +13,83 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v5    # ← v4 改为 v5
+        uses: actions/checkout@v5   # 升级至 v5，支持 Node.js 24
 
       - name: TCP 443 端口延迟测试（取前20，带 #JP v4 标签）
         run: |
+          set -e  # 出错即停，便于调试
+
+          # 生成 IP 列表（172.64.229.1 ~ 254）
           for i in {1..254}; do
             echo "172.64.229.$i"
           done > ip_list.txt
 
+          # 测试函数：每个 IP 独立输出到临时文件（避免并行写冲突）
           test_ip() {
             ip=$1
+            # 将 IP 中的点替换为下划线，用作文件名
+            safe_ip=$(echo "$ip" | tr '.' '_')
+            tmp_file="/tmp/result_${safe_ip}.txt"
+            
             time=$(curl -o /dev/null -s -w "%{time_connect}" --connect-timeout 3 -k "https://${ip}:443" 2>/dev/null)
             if [ -n "$time" ] && [ "$time" != "0.000" ] && [ "$time" != "0" ]; then
-              echo "$ip $time"
+              echo "$ip $time" > "$tmp_file"
             fi
           }
           export -f test_ip
 
-          cat ip_list.txt | xargs -P 50 -I {} bash -c 'test_ip "$@"' _ {} > raw_result.txt
+          # 并行执行（50 个并发），每个 IP 独立写文件
+          cat ip_list.txt | xargs -P 50 -I {} bash -c 'test_ip "$@"' _ {}
 
-          if [ ! -s raw_result.txt ]; then
+          # 合并所有临时文件到 raw_result.txt（按行排序）
+          cat /tmp/result_*.txt 2>/dev/null | sort -k2 -n > raw_result.txt || true
+          rm -f /tmp/result_*.txt
+
+          # 调试：打印原始结果行数
+          total=$(wc -l < raw_result.txt 2>/dev/null || echo 0)
+          echo "✅ 可用的 IP 总数：$total"
+
+          # 如果无结果，生成提示文件并退出（仍会提交，便于记录）
+          if [ "$total" -eq 0 ]; then
             echo "未找到任何可用的 443 端口 IP" > best_ips.txt
             echo "未找到任何可用的 443 端口 IP" > best_ips_iponly.txt
+            echo "⚠️  未找到可用 IP，已写入错误信息。"
             exit 0
           fi
 
-          sort -k2 -n raw_result.txt | head -20 > sorted.txt
+          # 取前 20 个最优（延迟最低）
+          head -20 raw_result.txt > sorted.txt
 
-          # 修改点：将 "#JP-IPv4" 改为 "#JP v4"
+          # 调试：打印 sorted.txt 内容（验证格式）
+          echo "--- sorted.txt 内容（前20行） ---"
+          cat sorted.txt
+          echo "----------------------------------"
+
+          # 生成带延迟和标签的结果（用于展示）
           awk '{printf "%-18s %.2f ms  #JP v4 %02d\n", $1 ":443", $2*1000, NR}' sorted.txt > best_ips.txt
-          awk '{printf "%s#JP v4 %02d\n", $1 ":443", NR}' sorted.txt > best_ips_iponly.txt
 
-          total=$(wc -l < raw_result.txt)
-          echo "✅ 可用的 IP 总数：$total"
-          echo "📋 前 20 个最优 IP（带编号）："
+          # 生成仅含 IP:443#JP v4 编号 的结果（每行一个，确保换行）
+          n=1
+          while read ip delay; do
+            printf "%s#JP v4 %02d\n" "${ip}:443" $n
+            ((n++))
+          done < sorted.txt > best_ips_iponly.txt
+
+          # 调试：打印最终生成的文件内容
+          echo "--- best_ips.txt 内容 ---"
+          cat best_ips.txt
+          echo "--------------------------"
+          echo "--- best_ips_iponly.txt 内容 ---"
           cat best_ips_iponly.txt
+          echo "--------------------------------"
+
+          echo "📋 已生成 best_ips.txt 和 best_ips_iponly.txt"
 
       - name: 提交并推送结果
         run: |
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git add best_ips.txt best_ips_iponly.txt
+          # 若文件无变化则跳过提交，否则提交并推送
           git diff --staged --quiet || git commit -m "自动更新优选IP（443端口，带编号标签 $(date +'%Y-%m-%d %H:%M:%S')）"
           git push
