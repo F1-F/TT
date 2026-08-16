@@ -15,7 +15,7 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v5    # ← v4 改为 v5
 
-      - name: TCP 443 端口延迟测试（取前20，带 #JP-IPv4 标签）
+      - name: TCP 443 端口延迟测试（取前20，带 #JP v4 标签）
         run: |
           for i in {1..254}; do
             echo "172.64.229.$i"
@@ -40,8 +40,9 @@ jobs:
 
           sort -k2 -n raw_result.txt | head -20 > sorted.txt
 
-          awk '{printf "%-18s %.2f ms  #JP-IPv4 %02d\n", $1 ":443", $2*1000, NR}' sorted.txt > best_ips.txt
-          awk '{printf "%s#JP-IPv4 %02d\n", $1 ":443", NR}' sorted.txt > best_ips_iponly.txt
+          # 修改点：将 "#JP-IPv4" 改为 "#JP v4"
+          awk '{printf "%-18s %.2f ms  #JP v4 %02d\n", $1 ":443", $2*1000, NR}' sorted.txt > best_ips.txt
+          awk '{printf "%s#JP v4 %02d\n", $1 ":443", NR}' sorted.txt > best_ips_iponly.txt
 
           total=$(wc -l < raw_result.txt)
           echo "✅ 可用的 IP 总数：$total"
