@@ -15,7 +15,7 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v5
 
-      - name: TCP 443 端口延迟测试（强制覆盖三个CIDR）
+      - name: TCP 443 端口延迟测试（强制覆盖三个CIDR，动态取数）
         run: |
           # 定义三个IPv6前缀
           prefixes=(
@@ -49,38 +49,44 @@ jobs:
             exit 0
           fi
 
-          # ----- 强制每个CIDR至少一个IP -----
-          # 1. 分别取出每个CIDR的最佳IP（延迟最小）
-          best_lines=()
+          # ----- 每个CIDR取前 min(5, 可用数) 个，若可用数为0则跳过 -----
+          > forced.txt
+          total_forced=0
           for p in "${prefixes[@]}"; do
-            line=$(grep "^${p}" raw_result.txt | sort -k2 -n | head -1)
-            if [ -z "$line" ]; then
-              echo "❌ 错误：CIDR ${p}::/48 无可用IP，无法满足三个CIDR均包含的要求"
-              exit 1
+            grep "^${p}" raw_result.txt | sort -k2 -n > "${p}.all"
+            count=$(wc -l < "${p}.all")
+            if [ "$count" -eq 0 ]; then
+              echo "⚠️ CIDR ${p}::/48 无可用IP"
+              continue
             fi
-            best_lines+=("$line")
+            take=$(( count < 5 ? count : 5 ))
+            head -n "$take" "${p}.all" >> forced.txt
+            total_forced=$((total_forced + take))
           done
 
-          # 2. 从全部结果中排除这三个最佳IP
-          printf "%s\n" "${best_lines[@]}" | awk '{print $1}' > best_ips_to_exclude.txt
-          grep -v -F -f best_ips_to_exclude.txt raw_result.txt > raw_remaining.txt
+          # 从全部结果中排除强制选出的IP，得到剩余
+          awk '{print $1}' forced.txt > forced_ips.txt
+          grep -v -F -f forced_ips.txt raw_result.txt > raw_remaining.txt
 
-          # 3. 从剩余IP中取延迟最小的 17 个（补足总数20）
-          sort -k2 -n raw_remaining.txt | head -17 > remaining_top17.txt
+          # 计算需要补足的数量（目标20）
+          need=$((20 - total_forced))
+          if [ $need -gt 0 ]; then
+            sort -k2 -n raw_remaining.txt | head -n $need > remaining_top.txt
+          else
+            > remaining_top.txt
+          fi
 
-          # 4. 合并最佳3个 + 剩余17个，按延迟排序，取前20（实际正好20）
-          cat <(printf "%s\n" "${best_lines[@]}") remaining_top17.txt | sort -k2 -n > final_sorted.txt
-
-          # 取前20（确保编号连续）
-          head -20 final_sorted.txt > sorted.txt
+          # 合并并按延迟排序，取前20（实际可能不足20）
+          cat forced.txt remaining_top.txt | sort -k2 -n | head -20 > sorted.txt
 
           # 输出格式：地址:端口（IPv6带方括号），延迟，标签和编号
           awk '{printf "[%s]:443  %.2f ms  #JP-IPv6 %02d\n", $1, $2*1000, NR}' sorted.txt > best_ips_v6.txt
           awk '{printf "[%s]:443#JP-IPv6 %02d\n", $1, NR}' sorted.txt > best_ips_iponly_v6.txt
 
           total=$(wc -l < raw_result.txt)
+          final_count=$(wc -l < sorted.txt)
           echo "✅ 可用的 IPv6 总数：$total"
-          echo "📋 最终前 20 个最优 IPv6（强制包含三个CIDR）："
+          echo "📋 最终优选 IPv6（强制覆盖三个CIDR，共$final_count个）："
           cat best_ips_iponly_v6.txt
 
       - name: 提交并推送结果
